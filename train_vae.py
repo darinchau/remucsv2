@@ -58,12 +58,18 @@ class VAEDataset(torch.utils.data.Dataset):
         stop_sample = start_sample + chunk_length
         signal, sampling_rate = af.read(path, offset=f"{start_sample}", duration=f"{chunk_length}")
         audio = Audio(torch.from_numpy(signal), sampling_rate)
-        separated_audio = self.separator.separate(audio)
+        print("Separating audio from", path)
+        try:
+            separated_audio = self.separator.separate(audio)
+        except Exception as e:
+            # There is a small but nonzero chance that the audio cannot be read after it is separated
+            print(f"Error separating audio from {path}: {e}")
+            return self.__getitem__(random.randint(0, len(self.paths) - 1))
         if len(separated_audio) != self.config.nstems:
             raise ValueError(
                 f"Expected {self.config.nstems} stems, but got {len(separated_audio)} stems from {path}"
             )
-        separated_audio = [a.resample(self.config.sample_rate).pad(self.config.audio_length, warn=64).to_nchannels(2) for a in separated_audio]
+        separated_audio = [a.resample(self.config.sample_rate).pad(self.config.audio_length, warn=1024).to_nchannels(2) for a in separated_audio]
         take_left_channel = int(random.choice([True, False]))
         thing = torch.stack([a.data[take_left_channel] for a in separated_audio], dim=0).unsqueeze(0)  # shape: S, L
         return thing
@@ -144,10 +150,10 @@ def inference(
     with autocast('cuda'):
         model_output: VAEOutput = model(target_spec)
 
-    pred_spec = model_output.output
+    pred_spec = model_output.output  # B, S*2, N, T
     pred_audio = stft.inverse(
         torch.view_as_complex(pred_spec.float().unflatten(1, (config.nstems, 2)).flatten(0, 1).permute(0, 2, 3, 1).contiguous())
-    ).unflatten(0, (batch_size, config.nstems))
+    ).unflatten(0, (batch_size, config.nstems))  # B, S, L
 
     with autocast('cuda'):
         recon_loss = reconstruction_loss(pred_spec, target_spec)
@@ -172,6 +178,7 @@ def validate(
         return
 
     model.eval()
+    log_audio = None
     with torch.no_grad():
         val_recon_losses = []
         val_codebook_losses = []
@@ -181,7 +188,6 @@ def validate(
             if val_count_ > config.val_count:
                 break
 
-            ###  Copy pasted from training loop ###
             model_output, pred_spec, pred_audio, recon_loss, g_loss = inference(
                 target_audio,
                 config,
@@ -190,7 +196,6 @@ def validate(
                 reconstruction_loss
             )
 
-            #######################################
             val_recon_loss = recon_loss.item()
             val_recon_losses.append(val_recon_loss)
 
@@ -200,6 +205,9 @@ def validate(
             val_commitment_loss = model_output.commitment_loss.item()
             val_commitment_losses.append(val_commitment_loss)
 
+            if log_audio is None:
+                log_audio = (target_audio[0, 0, 0], target_audio[0, 0, 1], pred_audio[0, 1])
+
     wandb.log({
         "Val Reconstruction Loss": np.mean(val_recon_losses),
         "Val Codebook Loss": np.mean(val_codebook_losses),
@@ -207,6 +215,16 @@ def validate(
     }, step=step_count)
 
     tqdm.write(f"Validation complete: Reconstruction loss: {np.mean(val_recon_losses)}, Codebook loss: {np.mean(val_codebook_losses)}")
+
+    # Log an audio sample
+    if log_audio is not None:
+        wandb.log({
+            "Validation Audio": {
+                "target_1": wandb.Audio(log_audio[0].cpu().numpy(), sample_rate=config.sample_rate, caption="Target Channel 1"),
+                "target_2": wandb.Audio(log_audio[1].cpu().numpy(), sample_rate=config.sample_rate, caption="Target Channel 2"),
+                "predicted": wandb.Audio(log_audio[2].cpu().numpy(), sample_rate=config.sample_rate, caption="Predicted Audio")
+            }
+        }, step=step_count)
     model.train()
 
 
@@ -324,7 +342,7 @@ def train(config_path: str, start_from_iter: int = 0):
                 "Reconstruction Loss": recon_loss.item(),
                 "Codebook Loss": model_output.codebook_loss.item(),
                 "Commitment Loss": model_output.commitment_loss.item(),
-                "Total Generator Loss": g_loss.item(),
+                "Total Generator Loss": g_loss.item() * config.autoencoder_acc_steps,  # Scale the loss back to the original scale
                 "Generator Learning Rate": optimizer_g.param_groups[0]['lr'],
             }, step=step_count)
 

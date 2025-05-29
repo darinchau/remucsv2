@@ -28,7 +28,7 @@ num_up_layers : 2                                 # Number of upsampling layers
 seed : 1943                                       # Random seed
 gradient_checkpointing : True                     # Whether to use gradient checkpointing
 num_workers_dl: 0                                 # Number of workers for data loading
-batch_size: 8                                     # Batch size for autoencoder training
+batch_size: 2                                     # Batch size for autoencoder training
 codebook_weight: 1                                # Weight of codebook loss
 commitment_beta: 0.2                              # Weight of commitment loss
 steps: 100000                                     # Number of training steps to perform in total
