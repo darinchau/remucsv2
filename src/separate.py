@@ -7,9 +7,9 @@ import tempfile
 class Separator:
     """Wraps the audio separator to provide a simpler interface."""
 
-    def __init__(self, model_name: str | None = None):
+    def __init__(self, model_name: str = ""):
         self.separator = _AudioSeparator(log_level=40)  # Set log level to ERROR to suppress debug messages
-        if model_name is not None:
+        if model_name:
             self.separator.load_model(model_name)
         else:
             # Default model
@@ -34,4 +34,4 @@ class Separator:
             self.separator.model_instance.output_dir = temp_dir  # type: ignore
             output_paths = self.separator.separate(audio_file, custom_names)
             output_paths = sorted(output_paths)
-            return [Audio.load(path) for path in output_paths]
+            return [Audio.load(os.path.join(temp_dir, filename)) for filename in output_paths]

@@ -7,6 +7,7 @@ from .stft import STFT
 
 @dataclass(frozen=True)
 class VAEConfig:
+    separator: str
     nstems: int
     dataset_dir: str
     output_dir: str
@@ -49,7 +50,7 @@ class VAEConfig:
         """Returns the number of spectrograms that we will work with
         Different from nstems in the sense that it is the number of channels for the VAE input
         which could be different from the number of stems in the dataset."""
-        return self.nstems
+        return self.nstems * 2
 
     @property
     def audio_length(self) -> int:

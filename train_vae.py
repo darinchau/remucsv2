@@ -41,21 +41,22 @@ class VAEDataset(torch.utils.data.Dataset):
     def __init__(self, config: VAEConfig, paths: list[str]):
         self.paths = paths
         self.config = config
-        self.separator = Separator()
+        self.separator = Separator(model_name=config.separator)
 
     def __len__(self):
         return len(self.paths)
 
     def __getitem__(self, idx: int):
-        path = self.paths[idx]
+        path = os.path.join(self.config.dataset_dir, self.paths[idx])
         total_samples = af.samples(path)
-        chunk_length = self.config.audio_length
+        orig_sr = af.sampling_rate(path)
+        chunk_length = int(self.config.audio_length * orig_sr / self.config.sample_rate)
         if chunk_length > total_samples:
             return self.__getitem__(random.randint(0, len(self.paths) - 1))
 
         start_sample = random.randint(0, total_samples - chunk_length)
         stop_sample = start_sample + chunk_length
-        signal, sampling_rate = af.read(path, start=start_sample, stop=stop_sample)
+        signal, sampling_rate = af.read(path, offset=f"{start_sample}", duration=f"{chunk_length}")
         audio = Audio(torch.from_numpy(signal), sampling_rate)
         separated_audio = self.separator.separate(audio)
         if len(separated_audio) != self.config.nstems:
@@ -134,18 +135,18 @@ def inference(
     batch_size = target_audio.shape[0]
     target_audio = target_audio.float().to(device)
     target_spec = stft.forward(
-        target_audio.float().flatten(0, 1)  # B*4, L
+        target_audio.float().flatten(0, 1)  # B*S, L
     )
-    target_spec = torch.view_as_real(target_spec).permute(0, 3, 1, 2)  # B*4, 2, N, T
-    target_spec = target_spec.unflatten(0, (batch_size, 4)).flatten(1, 2).float().to(device)  # B, 4*2, N, T
+    target_spec = torch.view_as_real(target_spec).permute(0, 3, 1, 2)  # B*S, 2, N, T
+    target_spec = target_spec.unflatten(0, (batch_size, config.nstems)).flatten(1, 2).float().to(device)  # B, S*2, N, T
 
     # Fetch autoencoders output(reconstructions)
     with autocast('cuda'):
         model_output: VAEOutput = model(target_spec)
 
     pred_spec = model_output.output
-    pred_audio = stft.griffin_lim(
-        pred_spec.float().flatten(0, 1)
+    pred_audio = stft.inverse(
+        torch.view_as_complex(pred_spec.float().unflatten(1, (config.nstems, 2)).flatten(0, 1).permute(0, 2, 3, 1).contiguous())
     ).unflatten(0, (batch_size, config.nstems))
 
     with autocast('cuda'):
