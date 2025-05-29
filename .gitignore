@@ -74,13 +74,8 @@ nohup.out
 
 /resources/*
 !resources/assets
-!resources/report.pdf
-!resources/dataset/
-!resources/ckpts
-resources/dataset/*
-resources/dataset/*/
-!resources/deep_dist.npz
-!resources/dataset/pack.db
+!resources/config
+!resources/config/*
 
 *.ipynb
 !demo.ipynb

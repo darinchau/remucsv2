@@ -1,18 +1,16 @@
 # This script is used to train the VQ-VAE model with a discriminator for adversarial loss
 # Use the config file in resources/config/vqvae.yaml to set the parameters for training
 # Adapted from https://github.com/explainingai-code/StableDiffusion-PyTorch/blob/main/tools/train_vqvae.py
-import yaml
+import audiofile as af
 import argparse
 import torch
 import random
 import os
 import hashlib
 import wandb
-import pickle
 import numpy as np
-import json
 import torch.nn.functional as F
-import time
+import random
 from tqdm.auto import tqdm
 from torch.utils.data import ConcatDataset
 from torch.utils.data.dataloader import DataLoader
@@ -22,11 +20,12 @@ from torch.amp.autocast_mode import autocast
 from accelerate import Accelerator
 from math import isclose
 
-from src.audio import YouTubeURL
+from src.audio import YouTubeURL, Audio
 from src.vae import RVQVAE as VAE, VAEOutput
 from src.vggish import Vggish
 from src.config import VAEConfig
 from src.stft import STFT
+from src.separate import Separator
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -37,20 +36,36 @@ TEST_SPLIT_PERCENTAGE = 0.1
 
 assert isclose(TRAIN_SPLIT_PERCENTAGE + VALIDATION_SPLIT_PERCENTAGE + TEST_SPLIT_PERCENTAGE, 1.0)
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
 
 class VAEDataset(torch.utils.data.Dataset):
-    def __init__(self, config: VAEConfig, urls: list[str]):
-        self.urls = urls
+    def __init__(self, config: VAEConfig, paths: list[str]):
+        self.paths = paths
         self.config = config
-        ...
+        self.separator = Separator()
 
     def __len__(self):
-        return len(self.urls)
+        return len(self.paths)
 
     def __getitem__(self, idx: int):
-        ...
+        path = self.paths[idx]
+        total_samples = af.samples(path)
+        chunk_length = self.config.audio_length
+        if chunk_length > total_samples:
+            return self.__getitem__(random.randint(0, len(self.paths) - 1))
+
+        start_sample = random.randint(0, total_samples - chunk_length)
+        stop_sample = start_sample + chunk_length
+        signal, sampling_rate = af.read(path, start=start_sample, stop=stop_sample)
+        audio = Audio(torch.from_numpy(signal), sampling_rate)
+        separated_audio = self.separator.separate(audio)
+        if len(separated_audio) != self.config.nstems:
+            raise ValueError(
+                f"Expected {self.config.nstems} stems, but got {len(separated_audio)} stems from {path}"
+            )
+        separated_audio = [a.resample(self.config.sample_rate).pad(self.config.audio_length, warn=64).to_nchannels(2) for a in separated_audio]
+        take_left_channel = int(random.choice([True, False]))
+        thing = torch.stack([a.data[take_left_channel] for a in separated_audio], dim=0).unsqueeze(0)  # shape: S, L
+        return thing
 
 
 def load_lpips(config: VAEConfig):
@@ -85,22 +100,22 @@ def set_seed(seed: int):
         torch.cuda.manual_seed_all(seed)
 
 
-def partition_files(urls: list[str], percents: dict[str, float]) -> dict[str, list[str]]:
-    # Use a hacky deterministic partitioning based on the SHA-256 hash of the URL
+def partition_files(paths: list[str], percents: dict[str, float]) -> dict[str, list[str]]:
+    # Use a hacky deterministic partitioning based on the SHA-256 hash of the path
     # to accomodate the expansion of our dataset in the near future
     assert sum(percents.values()) == 1.0, "Percentages must sum to 1.0"
     splits = {k: set() for k in percents.keys()}
-    for url in urls:
-        hash_object = hashlib.sha256(url.encode())
+    for path in paths:
+        hash_object = hashlib.sha256(path.encode())
         hash_digest = hash_object.hexdigest()
         probability = int(hash_digest, 16) / (2**256 - 1)
         for split, x_percent in percents.items():
             if probability < x_percent:
-                splits[split].add(url)
+                splits[split].add(path)
                 break
             else:
                 probability -= x_percent
-    return {split: sorted(urls) for split, urls in splits.items()}
+    return {s: sorted(p) for s, p in splits.items()}
 
 
 def inference(
@@ -110,10 +125,10 @@ def inference(
     stft: STFT,
     reconstruction_loss: nn.Module,
 ):
-    target_audio = target_audio.flatten(0, 1)  # im shape: B, 4, L
+    target_audio = target_audio.flatten(0, 1)  # im shape: B, S, L
 
     assert isinstance(target_audio, torch.Tensor)
-    assert target_audio.dim() == 3  # im shape: B, nsources/2=4, L
+    assert target_audio.dim() == 3  # im shape: B, S, L
     assert target_audio.shape[1] == config.nstems
 
     batch_size = target_audio.shape[0]

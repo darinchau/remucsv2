@@ -46,7 +46,9 @@ class VAEConfig:
 
     @property
     def nsources(self):
-        """Returns the number of spectrograms that we will work with"""
+        """Returns the number of spectrograms that we will work with
+        Different from nstems in the sense that it is the number of channels for the VAE input
+        which could be different from the number of stems in the dataset."""
         return self.nstems
 
     @property
