@@ -36,6 +36,7 @@ class VAEConfig:
     codebook_weight: float
     commitment_beta: float
     entropy_weight: float
+    p_skip_quantization: float
     steps: int
     autoencoder_lr: float
     autoencoder_acc_steps: int

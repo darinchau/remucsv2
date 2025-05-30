@@ -32,6 +32,7 @@ batch_size: 2                                     # Batch size for autoencoder t
 codebook_weight: 1                                # Weight of codebook loss
 commitment_beta: 0.2                              # Weight of commitment loss
 entropy_weight: 0.05                              # Weight of entropy loss
+p_skip_quantization: 0.0                          # Probability of skipping quantization during the training step to ensure efficient gradient flow
 steps: 100000                                     # Number of training steps to perform in total
 autoencoder_lr: 0.00001                           # Learning rate for the autoencoder
 autoencoder_acc_steps: 16                         # Number of accumulation steps for the autoencoder

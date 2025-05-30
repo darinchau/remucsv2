@@ -1,11 +1,12 @@
 # Implements VQVAE encoder and decoder model to convert spectrogram to latent space and back to spectrogram.
 # Code in part referenced from https://github.com/explainingai-code/StableDiffusion-PyTorch
 
+import random
 import torch
+import torch.functional as F
 from torch import nn, Tensor
 from torch.utils.checkpoint import checkpoint
 from dataclasses import dataclass
-import torch.functional as F
 from AutoMasher.fyp.audio.base.audio_collection import DemucsCollection
 from .config import VAEConfig
 
@@ -440,19 +441,20 @@ class RVQVAE(nn.Module):
             "commitment_loss": 0.0,
             "entropy_loss": 0.0
         }
-        residual = out
-        for idx, quant in enumerate(self.quants):
-            quant_out, q_losses, indices = quant(residual)
-            quant_losses["codebook_loss"] += q_losses["codebook_loss"]
-            quant_losses["commitment_loss"] += q_losses["commitment_loss"]
-            p = torch.bincount(indices.flatten(), minlength=self.config.codebook_size) / indices.size(0)
-            entropy_loss = -torch.mean(p * torch.log(p + 1e-10))
-            quant_losses["entropy_loss"] += entropy_loss  # type: ignore
-            if idx == 0:
-                out = quant_out
-            else:
-                out += quant_out
-            residual -= quant_out
+        if random.random() > self.config.p_skip_quantization:
+            residual = out
+            for idx, quant in enumerate(self.quants):
+                quant_out, q_losses, indices = quant(residual)
+                quant_losses["codebook_loss"] += q_losses["codebook_loss"]
+                quant_losses["commitment_loss"] += q_losses["commitment_loss"]
+                p = torch.bincount(indices.flatten(), minlength=self.config.codebook_size) / indices.size(0)
+                entropy_loss = -torch.mean(p * torch.log(p + 1e-10))
+                quant_losses["entropy_loss"] += entropy_loss  # type: ignore
+                if idx == 0:
+                    out = quant_out
+                else:
+                    out += quant_out
+                residual -= quant_out
         return out, quant_losses
 
     def decode(self, z):
