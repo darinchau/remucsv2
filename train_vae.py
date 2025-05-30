@@ -64,7 +64,6 @@ class VAEDataset(torch.utils.data.Dataset):
             # There is a small but nonzero chance that the audio cannot be read
             print(f"Error reading audio from {path}: {e}")
             return self.__getitem__(random.randint(0, len(self.paths) - 1))
-        print("Separating audio from", path)
         try:
             separated_audio = self.separator.separate(audio)
         except Exception as e:

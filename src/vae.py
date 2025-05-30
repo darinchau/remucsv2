@@ -445,8 +445,8 @@ class RVQVAE(nn.Module):
             quant_out, q_losses, indices = quant(residual)
             quant_losses["codebook_loss"] += q_losses["codebook_loss"]
             quant_losses["commitment_loss"] += q_losses["commitment_loss"]
-            p = torch.bincount(indices, minlength=self.config.codebook_size) / indices.size(0)
-            entropy_loss = -torch.sum(p * torch.log(p + 1e-10))
+            p = torch.bincount(indices.flatten(), minlength=self.config.codebook_size) / indices.size(0)
+            entropy_loss = -torch.mean(p * torch.log(p + 1e-10))
             quant_losses["entropy_loss"] += entropy_loss  # type: ignore
             if idx == 0:
                 out = quant_out
