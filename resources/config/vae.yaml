@@ -25,7 +25,8 @@ num_up_layers : 2                                 # Number of upsampling layers
 
 ## Training parameters
 seed : 1943                                       # Random seed
-gradient_checkpointing : True                     # Whether to use gradient checkpointing
+single_stem_training: False                        # Whether to train on single stem or multi-stem
+gradient_checkpointing: True                      # Whether to use gradient checkpointing
 num_workers_dl: 0                                 # Number of workers for data loading
 batch_size: 2                                     # Batch size for autoencoder training
 codebook_weight: 1                                # Weight of codebook loss

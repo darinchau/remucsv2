@@ -29,6 +29,7 @@ class VAEConfig:
     num_up_layers: int
 
     seed: int
+    single_stem_training: bool
     gradient_checkpointing: bool
     num_workers_dl: int
     batch_size: int
@@ -44,6 +45,9 @@ class VAEConfig:
     val_steps: int
     warmup_steps: int
     validate_at_step_1: bool
+
+    def __post_init__(self):
+        assert not self.single_stem_training or self.nstems == 1, "If single stem training is enabled, nstems must be 1."
 
     @property
     def nsources(self):

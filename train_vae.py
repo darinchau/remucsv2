@@ -70,13 +70,23 @@ class VAEDataset(torch.utils.data.Dataset):
             # There is a small but nonzero chance that the audio cannot be read after it is separated
             print(f"Error separating audio from {path}: {e}")
             return self.__getitem__(random.randint(0, len(self.paths) - 1))
-        if len(separated_audio) != self.config.nstems:
+        if not self.config.single_stem_training and len(separated_audio) != self.config.nstems:
             raise ValueError(
                 f"Expected {self.config.nstems} stems, but got {len(separated_audio)} stems from {path}"
             )
-        separated_audio = [a.resample(self.config.sample_rate).pad(self.config.audio_length, warn=1024).to_nchannels(2) for a in separated_audio]
         take_left_channel = int(random.choice([True, False]))
-        thing = torch.stack([a.data[take_left_channel] for a in separated_audio], dim=0).unsqueeze(0)  # shape: S, L
+        if self.config.single_stem_training:
+            # Pick one of the separated audios at random
+            separated_audio = random.choice(separated_audio)
+            thing = separated_audio \
+                .resample(self.config.sample_rate) \
+                .pad(self.config.audio_length, warn=1024) \
+                .to_nchannels(2).data[take_left_channel].unsqueeze(0)  # shape: S=1, L
+        else:
+            separated_audio = [a.resample(self.config.sample_rate)
+                               .pad(self.config.audio_length, warn=1024)
+                                .to_nchannels(2) for a in separated_audio]
+            thing = torch.stack([a.data[take_left_channel] for a in separated_audio], dim=0)  # shape: S, L
         return thing
 
 
@@ -137,8 +147,6 @@ def inference(
     stft: STFT,
     reconstruction_loss: nn.Module,
 ):
-    target_audio = target_audio.flatten(0, 1)  # im shape: B, S, L
-
     assert isinstance(target_audio, torch.Tensor)
     assert target_audio.dim() == 3  # im shape: B, S, L
     assert target_audio.shape[1] == config.nstems
@@ -216,7 +224,7 @@ def validate(
             val_entropy_losses.append(val_entropy_loss)
 
             if log_audio is None:
-                log_audio = (target_audio[0, 0, 0], target_audio[0, 0, 1], pred_audio[0, 1])
+                log_audio = (target_audio[0], pred_audio[0, 1])
 
     wandb.log({
         "Val Reconstruction Loss": np.mean(val_recon_losses),
@@ -229,12 +237,13 @@ def validate(
 
     # Log an audio sample
     if log_audio is not None:
+        target_audio, pred_audio = log_audio
+        log_audios = {}
+        for i in range(len(target_audio)):
+            log_audios[f"target_{i + 1}"] = wandb.Audio(target_audio[i].cpu().numpy(), sample_rate=config.sample_rate, caption=f"Target Channel {i + 1}")
+        log_audios["predicted"] = wandb.Audio(pred_audio.cpu().numpy(), sample_rate=config.sample_rate, caption="Predicted Audio")
         wandb.log({
-            "Validation Audio": {
-                "target_1": wandb.Audio(log_audio[0].cpu().numpy(), sample_rate=config.sample_rate, caption="Target Channel 1"),
-                "target_2": wandb.Audio(log_audio[1].cpu().numpy(), sample_rate=config.sample_rate, caption="Target Channel 2"),
-                "predicted": wandb.Audio(log_audio[2].cpu().numpy(), sample_rate=config.sample_rate, caption="Predicted Audio")
-            }
+            "Validation Audio": log_audios
         }, step=step_count)
     model.train()
 
