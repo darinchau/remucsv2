@@ -11,7 +11,6 @@ ntimeframes: 512                                  # Number of time frames in the
 nfft: 1025                                        # Number of features in the spectrogram. Relation with the usual nfft is this = (nfft / 2) + 1
 
 ## Model parameters
-z_channels: 4                                     # Number of channels in the latent space
 codebook_size: 4096                               # Size of each codebook for VQ-VAE
 nquantizers: 4                                    # Number of quantizers in the RVQ component
 down_channels : [32, 64, 128, 128]                # Number of channels in each downsampling layer

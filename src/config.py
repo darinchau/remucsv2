@@ -16,7 +16,6 @@ class VAEConfig:
     ntimeframes: int
     nfft: int
 
-    z_channels: int
     codebook_size: int
     nquantizers: int
     down_channels: tuple[int, ...]
@@ -52,6 +51,11 @@ class VAEConfig:
         Different from nstems in the sense that it is the number of channels for the VAE input
         which could be different from the number of stems in the dataset."""
         return self.nstems * 2
+
+    @property
+    def z_channels(self) -> int:
+        """Number of conv channels in the latent space."""
+        return self.nstems
 
     @property
     def audio_length(self) -> int:
