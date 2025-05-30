@@ -12,7 +12,7 @@ nfft: 1025                                        # Number of features in the sp
 
 ## Model parameters
 z_channels: 4                                     # Number of channels in the latent space
-codebook_size: 1024                               # Size of each codebook for VQ-VAE
+codebook_size: 4096                               # Size of each codebook for VQ-VAE
 nquantizers: 4                                    # Number of quantizers in the RVQ component
 down_channels : [32, 64, 128, 128]                # Number of channels in each downsampling layer
 mid_channels : [128, 128]                         # Number of channels in each middle layer

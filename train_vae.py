@@ -52,12 +52,18 @@ class VAEDataset(torch.utils.data.Dataset):
         orig_sr = af.sampling_rate(path)
         chunk_length = int(self.config.audio_length * orig_sr / self.config.sample_rate)
         if chunk_length > total_samples:
+            print(f"Chunk length {chunk_length} is greater than total samples {total_samples} in {path}")
             return self.__getitem__(random.randint(0, len(self.paths) - 1))
 
         start_sample = random.randint(0, total_samples - chunk_length)
         stop_sample = start_sample + chunk_length
-        signal, sampling_rate = af.read(path, offset=f"{start_sample}", duration=f"{chunk_length}")
-        audio = Audio(torch.from_numpy(signal), sampling_rate)
+        try:
+            signal, sampling_rate = af.read(path, offset=f"{start_sample}", duration=f"{chunk_length}", always_2d=True)
+            audio = Audio(torch.from_numpy(signal), sampling_rate)
+        except Exception as e:
+            # There is a small but nonzero chance that the audio cannot be read
+            print(f"Error reading audio from {path}: {e}")
+            return self.__getitem__(random.randint(0, len(self.paths) - 1))
         print("Separating audio from", path)
         try:
             separated_audio = self.separator.separate(audio)
