@@ -328,11 +328,12 @@ class QuantizeModule(nn.Module):
 
 
 class VAEOutput:
-    def __init__(self, output: Tensor, z: Tensor, codebook_loss: Tensor, commitment_loss: Tensor):
+    def __init__(self, output: Tensor, z: Tensor, codebook_loss: Tensor, commitment_loss: Tensor, entropy_loss: Tensor):
         self.output = output
         self.z = z
         self.codebook_loss = codebook_loss
         self.commitment_loss = commitment_loss
+        self.entropy_loss = entropy_loss
 
 
 class RVQVAE(nn.Module):
@@ -436,13 +437,17 @@ class RVQVAE(nn.Module):
         out = self.pre_quant_conv(out)
         quant_losses = {
             "codebook_loss": 0.0,
-            "commitment_loss": 0.0
+            "commitment_loss": 0.0,
+            "entropy_loss": 0.0
         }
         residual = out
         for idx, quant in enumerate(self.quants):
-            quant_out, q_losses, _ = quant(residual)
+            quant_out, q_losses, indices = quant(residual)
             quant_losses["codebook_loss"] += q_losses["codebook_loss"]
             quant_losses["commitment_loss"] += q_losses["commitment_loss"]
+            p = torch.bincount(indices, minlength=self.config.codebook_size) / indices.size(0)
+            entropy_loss = -torch.sum(p * torch.log(p + 1e-10))
+            quant_losses["entropy_loss"] += entropy_loss  # type: ignore
             if idx == 0:
                 out = quant_out
             else:
@@ -471,5 +476,6 @@ class RVQVAE(nn.Module):
             output=out,
             z=z,
             codebook_loss=quant_losses["codebook_loss"],  # type: ignore
-            commitment_loss=quant_losses["commitment_loss"]  # type: ignore
+            commitment_loss=quant_losses["commitment_loss"],  # type: ignore
+            entropy_loss=quant_losses["entropy_loss"]  # type: ignore
         )

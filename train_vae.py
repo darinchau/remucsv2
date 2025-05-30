@@ -166,7 +166,8 @@ def inference(
 
     g_loss: torch.Tensor = recon_loss + \
         config.codebook_weight * model_output.codebook_loss + \
-        config.commitment_beta * model_output.commitment_loss
+        config.commitment_beta * model_output.commitment_loss + \
+        config.entropy_weight * model_output.entropy_loss
     g_loss /= config.autoencoder_acc_steps
     return model_output, pred_spec, pred_audio, recon_loss, g_loss
 
@@ -189,6 +190,7 @@ def validate(
         val_recon_losses = []
         val_codebook_losses = []
         val_commitment_losses = []
+        val_entropy_losses = []
         for target_audio in tqdm(val_data_loader, f"Performing validation (step={step_count})", total=min(config.val_count, len(val_data_loader))):
             val_count_ += 1
             if val_count_ > config.val_count:
@@ -211,6 +213,9 @@ def validate(
             val_commitment_loss = model_output.commitment_loss.item()
             val_commitment_losses.append(val_commitment_loss)
 
+            val_entropy_loss = model_output.entropy_loss.item()
+            val_entropy_losses.append(val_entropy_loss)
+
             if log_audio is None:
                 log_audio = (target_audio[0, 0, 0], target_audio[0, 0, 1], pred_audio[0, 1])
 
@@ -218,6 +223,7 @@ def validate(
         "Val Reconstruction Loss": np.mean(val_recon_losses),
         "Val Codebook Loss": np.mean(val_codebook_losses),
         "Val Commitment Loss": np.mean(val_commitment_losses),
+        "Val Entropy Loss": np.mean(val_entropy_losses),
     }, step=step_count)
 
     tqdm.write(f"Validation complete: Reconstruction loss: {np.mean(val_recon_losses)}, Codebook loss: {np.mean(val_codebook_losses)}")
@@ -348,6 +354,7 @@ def train(config_path: str, start_from_iter: int = 0):
                 "Reconstruction Loss": recon_loss.item(),
                 "Codebook Loss": model_output.codebook_loss.item(),
                 "Commitment Loss": model_output.commitment_loss.item(),
+                "Entropy Loss": model_output.entropy_loss.item(),
                 "Total Generator Loss": g_loss.item() * config.autoencoder_acc_steps,  # Scale the loss back to the original scale
                 "Generator Learning Rate": optimizer_g.param_groups[0]['lr'],
             }, step=step_count)

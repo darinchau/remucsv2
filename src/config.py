@@ -35,6 +35,7 @@ class VAEConfig:
     batch_size: int
     codebook_weight: float
     commitment_beta: float
+    entropy_weight: float
     steps: int
     autoencoder_lr: float
     autoencoder_acc_steps: int
