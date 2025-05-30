@@ -224,7 +224,7 @@ def validate(
             val_entropy_losses.append(val_entropy_loss)
 
             if log_audio is None:
-                log_audio = (target_audio[0], pred_audio[0, 1])
+                log_audio = (target_audio[0], pred_audio[0, 0])
 
     wandb.log({
         "Val Reconstruction Loss": np.mean(val_recon_losses),
