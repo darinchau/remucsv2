@@ -2,6 +2,7 @@ import os
 from dataclasses import dataclass, asdict
 from typing import List
 import yaml
+import warnings
 from .stft import STFT
 
 
@@ -48,7 +49,11 @@ class VAEConfig:
     validate_at_step_1: bool
 
     def __post_init__(self):
-        assert not self.single_stem_training or self.nstems == 1, "If single stem training is enabled, nstems must be 1."
+        if self.single_stem_training and self.nstems != 1:
+            warnings.warn(
+                "Single stem training is enabled. This will only train on the first stem of the dataset."
+            )
+            object.__setattr__(self, 'nstems', 1)
 
     @property
     def nsources(self):

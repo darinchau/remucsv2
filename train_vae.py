@@ -140,6 +140,16 @@ def partition_files(paths: list[str], percents: dict[str, float]) -> dict[str, l
     return {s: sorted(p) for s, p in splits.items()}
 
 
+def signal_noise_ratio(preds: Tensor, target: Tensor, zero_mean: bool = False) -> Tensor:
+    eps = torch.finfo(preds.dtype).eps
+    if zero_mean:
+        target = target - torch.mean(target, dim=-1, keepdim=True)
+        preds = preds - torch.mean(preds, dim=-1, keepdim=True)
+    noise = target - preds
+    snr_value = (torch.sum(target**2, dim=-1) + eps) / (torch.sum(noise**2, dim=-1) + eps)
+    return 10 * torch.log10(snr_value)
+
+
 def inference(
     target_audio: Tensor,
     config: VAEConfig,
@@ -198,6 +208,7 @@ def validate(
         val_codebook_losses = []
         val_commitment_losses = []
         val_entropy_losses = []
+        val_snrs = []
         for target_audio in tqdm(val_data_loader, f"Performing validation (step={step_count})", total=min(config.val_count, len(val_data_loader))):
             val_count_ += 1
             if val_count_ > config.val_count:
@@ -223,6 +234,9 @@ def validate(
             val_entropy_loss = model_output.entropy_loss.item()
             val_entropy_losses.append(val_entropy_loss)
 
+            val_snr = signal_noise_ratio(pred_audio, target_audio, zero_mean=True)
+            val_snrs.append(val_snr.mean().item())
+
             if log_audio is None:
                 log_audio = (target_audio[0], pred_audio[0, 0])
 
@@ -230,7 +244,8 @@ def validate(
         "Val Reconstruction Loss": np.mean(val_recon_losses),
         "Val Codebook Loss": np.mean(val_codebook_losses),
         "Val Commitment Loss": np.mean(val_commitment_losses),
-        "Val Entropy Loss": np.mean(val_entropy_losses),
+        "Val Entropy Loss": -np.mean(val_entropy_losses),
+        "Val Signal to Noise Ratio": np.mean(val_snrs),
     }, step=step_count)
 
     tqdm.write(f"Validation complete: Reconstruction loss: {np.mean(val_recon_losses)}, Codebook loss: {np.mean(val_codebook_losses)}")
@@ -357,13 +372,16 @@ def train(config_path: str, start_from_iter: int = 0):
                 optimizer_g.step()
                 optimizer_g.zero_grad()
 
+            snr = signal_noise_ratio(pred_audio, target_audio, zero_mean=True)
+
             # Log losses
             wandb.log({
                 "Reconstruction Loss": recon_loss.item(),
                 "Codebook Loss": model_output.codebook_loss.item(),
                 "Commitment Loss": model_output.commitment_loss.item(),
-                "Entropy Loss": model_output.entropy_loss.item(),
+                "Entropy Loss": -model_output.entropy_loss.item(),
                 "Total Generator Loss": g_loss.item() * config.autoencoder_acc_steps,  # Scale the loss back to the original scale
+                "Signal to Noise Ratio": snr.mean().item(),
                 "Generator Learning Rate": optimizer_g.param_groups[0]['lr'],
             }, step=step_count)
 
