@@ -437,11 +437,11 @@ class RVQVAE(nn.Module):
         out = self.encoder_conv_out(out)
         out = self.pre_quant_conv(out)
         quant_losses = {
-            "codebook_loss": 0.0,
-            "commitment_loss": 0.0,
-            "entropy_loss": 0.0
+            "codebook_loss": torch.tensor(0.0, device=x.device),
+            "commitment_loss": torch.tensor(0.0, device=x.device),
+            "entropy_loss": torch.tensor(0.0, device=x.device)
         }
-        if random.random() > self.config.p_skip_quantization:
+        if self.training and random.random() > self.config.p_skip_quantization:
             residual = out
             for idx, quant in enumerate(self.quants):
                 quant_out, q_losses, indices = quant(residual)

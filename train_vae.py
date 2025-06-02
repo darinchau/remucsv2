@@ -140,14 +140,14 @@ def partition_files(paths: list[str], percents: dict[str, float]) -> dict[str, l
     return {s: sorted(p) for s, p in splits.items()}
 
 
-def signal_noise_ratio(preds: Tensor, target: Tensor, zero_mean: bool = False) -> Tensor:
+def signal_noise_ratio(preds: Tensor, target: Tensor, zero_mean: bool = False) -> float:
     eps = torch.finfo(preds.dtype).eps
     if zero_mean:
         target = target - torch.mean(target, dim=-1, keepdim=True)
         preds = preds - torch.mean(preds, dim=-1, keepdim=True)
     noise = target - preds
     snr_value = (torch.sum(target**2, dim=-1) + eps) / (torch.sum(noise**2, dim=-1) + eps)
-    return 10 * torch.log10(snr_value)
+    return torch.mean(10 * torch.log10(snr_value)).item()
 
 
 def inference(
@@ -186,7 +186,11 @@ def inference(
         config.commitment_beta * model_output.commitment_loss + \
         config.entropy_weight * model_output.entropy_loss
     g_loss /= config.autoencoder_acc_steps
-    return model_output, pred_spec, pred_audio, recon_loss, g_loss
+
+    snr = signal_noise_ratio(pred_audio, target_audio, zero_mean=True)
+    assert target_audio.device == pred_audio.device, f"Target audio and predicted audio must be on the same device, got {target_audio.device} and {pred_audio.device}"
+    assert target_audio.shape == pred_audio.shape, f"Target audio and predicted audio must have the same shape, got {target_audio.shape} and {pred_audio.shape}"
+    return model_output, pred_spec, pred_audio, recon_loss, snr, g_loss
 
 
 def validate(
@@ -214,7 +218,7 @@ def validate(
             if val_count_ > config.val_count:
                 break
 
-            model_output, pred_spec, pred_audio, recon_loss, g_loss = inference(
+            model_output, pred_spec, pred_audio, recon_loss, snr, g_loss = inference(
                 target_audio,
                 config,
                 model,
@@ -234,8 +238,7 @@ def validate(
             val_entropy_loss = model_output.entropy_loss.item()
             val_entropy_losses.append(val_entropy_loss)
 
-            val_snr = signal_noise_ratio(pred_audio, target_audio, zero_mean=True)
-            val_snrs.append(val_snr.mean().item())
+            val_snrs.append(snr)
 
             if log_audio is None:
                 log_audio = (target_audio[0], pred_audio[0, 0])
@@ -358,7 +361,7 @@ def train(config_path: str, start_from_iter: int = 0):
                 stop_training = True
                 break
 
-            model_output, pred_spec, pred_audio, recon_loss, g_loss = inference(
+            model_output, pred_spec, pred_audio, recon_loss, snr, g_loss = inference(
                 target_audio,
                 config,
                 model,
@@ -372,8 +375,6 @@ def train(config_path: str, start_from_iter: int = 0):
                 optimizer_g.step()
                 optimizer_g.zero_grad()
 
-            snr = signal_noise_ratio(pred_audio, target_audio, zero_mean=True)
-
             # Log losses
             wandb.log({
                 "Reconstruction Loss": recon_loss.item(),
@@ -381,7 +382,7 @@ def train(config_path: str, start_from_iter: int = 0):
                 "Commitment Loss": model_output.commitment_loss.item(),
                 "Entropy Loss": -model_output.entropy_loss.item(),
                 "Total Generator Loss": g_loss.item() * config.autoencoder_acc_steps,  # Scale the loss back to the original scale
-                "Signal to Noise Ratio": snr.mean().item(),
+                "Signal to Noise Ratio": snr,
                 "Generator Learning Rate": optimizer_g.param_groups[0]['lr'],
             }, step=step_count)
 
