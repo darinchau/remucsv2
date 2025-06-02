@@ -13,8 +13,8 @@ nfft: 1025                                        # Number of features in the sp
 ## Model parameters
 codebook_size: 4096                               # Size of each codebook for VQ-VAE
 nquantizers: 4                                    # Number of quantizers in the RVQ component
-down_channels : [32, 64, 128, 128]                # Number of channels in each downsampling layer
-mid_channels : [128, 128]                         # Number of channels in each middle layer
+down_channels : [64, 128, 256, 256]               # Number of channels in each downsampling layer
+mid_channels : [256, 256]                         # Number of channels in each middle layer
 down_sample : [2, 2, 4]                           # Downsampling factors for each downsampling layer
 attn_down : [False, False, False]                 # Whether to use attention in each downsampling layer
 norm_channels: 32                                 # Number of channels for normalization
