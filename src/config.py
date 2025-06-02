@@ -1,9 +1,16 @@
 import os
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from typing import List
 import yaml
 import warnings
 from .stft import STFT
+
+
+def get_random_string(length: int = 14) -> str:
+    """Generates a random string of fixed length."""
+    import random
+    import string
+    return ''.join(random.choices(string.ascii_letters + string.digits, k=length))
 
 
 @dataclass(frozen=True)
@@ -48,6 +55,8 @@ class VAEConfig:
     warmup_steps: int
     validate_at_step_1: bool
 
+    _run_id: str = field(init=False, repr=False, default_factory=lambda: get_random_string())
+
     def __post_init__(self):
         if self.single_stem_training and self.nstems != 1:
             warnings.warn(
@@ -80,7 +89,7 @@ class VAEConfig:
         return VAEConfig(**yaml_data)
 
     def get_vae_save_path(self, step: int) -> str:
-        path = os.path.join(self.output_dir, self.run_name, f"step-{step:06d}", self.ckpt_name)
+        path = os.path.join(self.output_dir, self.run_name, self._run_id, f"step-{step:06d}", self.ckpt_name)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         return path
 

@@ -1,6 +1,3 @@
-# This script is used to train the VQ-VAE model with a discriminator for adversarial loss
-# Use the config file in resources/config/vqvae.yaml to set the parameters for training
-# Adapted from https://github.com/explainingai-code/StableDiffusion-PyTorch/blob/main/tools/train_vqvae.py
 import audiofile as af
 import argparse
 import torch
@@ -11,6 +8,7 @@ import wandb
 import numpy as np
 import torch.nn.functional as F
 import random
+import json  # Added import
 from tqdm.auto import tqdm
 from torch.utils.data import ConcatDataset
 from torch.utils.data.dataloader import DataLoader
@@ -248,7 +246,7 @@ def validate(
         "Val Codebook Loss": np.mean(val_codebook_losses),
         "Val Commitment Loss": np.mean(val_commitment_losses),
         "Val Entropy Loss": -np.mean(val_entropy_losses),
-        "Val Signal to Noise Ratio": np.mean(val_snrs),
+        "Val SNR": np.mean(val_snrs),
     }, step=step_count)
 
     tqdm.write(f"Validation complete: Reconstruction loss: {np.mean(val_recon_losses)}, Codebook loss: {np.mean(val_codebook_losses)}")
@@ -266,9 +264,8 @@ def validate(
     model.train()
 
 
-def train(config_path: str, start_from_iter: int = 0):
+def train(config: VAEConfig, start_from_iter: int = 0):
     """Retrains the discriminator. If discriminator is None, a new discriminator is created based on the PatchGAN architecture."""
-    config = VAEConfig.load(config_path)
     set_seed(config.seed)
 
     # Create the model and dataset #
@@ -342,12 +339,6 @@ def train(config_path: str, start_from_iter: int = 0):
 
     stft = STFT(config.nfft, config.ntimeframes)
 
-    wandb.init(
-        # set the wandb project where this run will be logged
-        project=config.run_name,
-        config=config.asdict()
-    )
-
     model.train()
 
     while True:
@@ -412,13 +403,41 @@ def train(config_path: str, start_from_iter: int = 0):
         if stop_training:
             break
 
-    wandb.finish()
     print('Done Training...')
 
 
-if __name__ == '__main__':
+def main():
     parser = argparse.ArgumentParser(description='Arguments for vq vae training')
     parser.add_argument('--config', dest='config_path', default='resources/config/vae.yaml', type=str)
     parser.add_argument('--start_iter', dest='start_iter', type=int, default=0)
+    parser.add_argument('--sweep', dest='sweep', action='store_true', default=False,)
     args = parser.parse_args()
-    train(args.config_path, start_from_iter=args.start_iter)
+    config = VAEConfig.load(args.config_path)
+    wandb.login()
+
+    if args.sweep:
+        sweep_config_path = './resources/config/vaesweep.json'
+        with open(sweep_config_path, 'r') as f:
+            sweep_config = json.load(f)
+
+        def train_sweep():
+            with wandb.init(project=config.run_name):
+                config_ = config.asdict()
+                config_.update(wandb.config)
+                del config_['_run_id']
+                sweep_run_config = VAEConfig(**config_)
+                print("Sweep run config:", sweep_run_config.asdict())
+                train(sweep_run_config, start_from_iter=args.start_iter)
+
+        sweep_id = wandb.sweep(sweep_config, project=config.run_name)
+        wandb.agent(sweep_id, function=train_sweep, count=sweep_config.get('run_cap', None))
+    else:
+        with wandb.init(
+            project=config.run_name,
+            config=config.asdict(),
+        ):
+            train(config, start_from_iter=args.start_iter)
+
+
+if __name__ == '__main__':
+    main()
