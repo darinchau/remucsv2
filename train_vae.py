@@ -9,6 +9,7 @@ import numpy as np
 import torch.nn.functional as F
 import random
 import json  # Added import
+from collections import defaultdict
 from tqdm.auto import tqdm
 from torch.utils.data import ConcatDataset
 from torch.utils.data.dataloader import DataLoader
@@ -39,7 +40,6 @@ class VAEDataset(torch.utils.data.Dataset):
     def __init__(self, config: VAEConfig, paths: list[str]):
         self.paths = paths
         self.config = config
-        self.separator = Separator(model_name=config.separator)
 
     def __len__(self):
         return len(self.paths)
@@ -63,7 +63,8 @@ class VAEDataset(torch.utils.data.Dataset):
             print(f"Error reading audio from {path}: {e}")
             return self.__getitem__(random.randint(0, len(self.paths) - 1))
         try:
-            separated_audio = self.separator.separate(audio)
+            separator = Separator(model_name=self.config.separator)
+            separated_audio = separator.separate(audio)
         except Exception as e:
             # There is a small but nonzero chance that the audio cannot be read after it is separated
             print(f"Error separating audio from {path}: {e}")
@@ -79,37 +80,17 @@ class VAEDataset(torch.utils.data.Dataset):
             thing = separated_audio \
                 .resample(self.config.sample_rate) \
                 .pad(self.config.audio_length, warn=1024) \
-                .to_nchannels(2).data[take_left_channel].unsqueeze(0)  # shape: S=1, L
+                .to_nchannels(2).data[take_left_channel].unsqueeze(0)  # shape: S, L
+            audio = audio \
+                .resample(self.config.sample_rate) \
+                .pad(self.config.audio_length, warn=1024) \
+                .to_nchannels(2).data[take_left_channel].unsqueeze(0)  # shape: 1, L
         else:
             separated_audio = [a.resample(self.config.sample_rate)
                                .pad(self.config.audio_length, warn=1024)
                                 .to_nchannels(2) for a in separated_audio]
-            thing = torch.stack([a.data[take_left_channel] for a in separated_audio], dim=0)  # shape: S, L
+            thing = torch.stack([a.data[take_left_channel] for a in separated_audio] + [audio.data[take_left_channel]], dim=0)  # shape: S + 1, L
         return thing
-
-
-def load_lpips(config: VAEConfig):
-    class _PerceptualLossWrapper(nn.Module):
-        def __init__(self, in_sr: int):
-            super().__init__()
-            self.lpips = Vggish()
-            self.in_sr = in_sr
-
-        def forward(self, pred_audio, targ_audio):
-            pred1 = self.lpips((pred_audio, self.in_sr))
-            targ1 = self.lpips((targ_audio, self.in_sr))
-            return F.mse_loss(pred1, targ1)
-            # pred2 = self.lpips((pred_audio, self.lpips.input_sr))
-            # targ2 = self.lpips((targ_audio, self.lpips.input_sr))
-            # return (F.mse_loss(pred1, targ1) + F.mse_loss(pred2, targ2)) * 0.5
-
-    model = _PerceptualLossWrapper(config.sample_rate)
-    model = model.eval().to(device)
-
-    for p in model.parameters():
-        p.requires_grad = False
-
-    return model
 
 
 def set_seed(seed: int):
@@ -138,13 +119,13 @@ def partition_files(paths: list[str], percents: dict[str, float]) -> dict[str, l
     return {s: sorted(p) for s, p in splits.items()}
 
 
-def signal_noise_ratio(preds: Tensor, target: Tensor, zero_mean: bool = False) -> float:
-    eps = torch.finfo(preds.dtype).eps
+def signal_noise_ratio(pred_audio: Tensor, target_audio: Tensor, zero_mean: bool = False) -> float:
+    eps = torch.finfo(pred_audio.dtype).eps
     if zero_mean:
-        target = target - torch.mean(target, dim=-1, keepdim=True)
-        preds = preds - torch.mean(preds, dim=-1, keepdim=True)
-    noise = target - preds
-    snr_value = (torch.sum(target**2, dim=-1) + eps) / (torch.sum(noise**2, dim=-1) + eps)
+        target_audio = target_audio - torch.mean(target_audio, dim=-1, keepdim=True)
+        pred_audio = pred_audio - torch.mean(pred_audio, dim=-1, keepdim=True)
+    noise = target_audio - pred_audio
+    snr_value = (torch.sum(target_audio**2, dim=-1) + eps) / (torch.sum(noise**2, dim=-1) + eps)
     return torch.mean(snr_value).item()
 
 
@@ -152,32 +133,30 @@ def inference(
     target_audio: Tensor,
     config: VAEConfig,
     model: VAE,
-    stft: STFT,
-    reconstruction_loss: nn.Module,
 ):
     assert isinstance(target_audio, torch.Tensor)
-    assert target_audio.dim() == 3  # im shape: B, S, L
+    assert target_audio.dim() == 3
     assert target_audio.shape[1] == config.nstems
 
     batch_size = target_audio.shape[0]
     target_audio = target_audio.float().to(device)
-    target_spec = stft.forward(
-        target_audio.float().flatten(0, 1)  # B*S, L
-    )
-    target_spec = torch.view_as_real(target_spec).permute(0, 3, 1, 2)  # B*S, 2, N, T
-    target_spec = target_spec.unflatten(0, (batch_size, config.nstems)).flatten(1, 2).float().to(device)  # B, S*2, N, T
 
     # Fetch autoencoders output(reconstructions)
     with autocast('cuda'):
-        model_output: VAEOutput = model(target_spec)
+        model_output: VAEOutput = model(target_audio)
 
-    pred_spec = model_output.output  # B, S*2, N, T
-    pred_audio = stft.inverse(
-        torch.view_as_complex(pred_spec.float().unflatten(1, (config.nstems, 2)).flatten(0, 1).permute(0, 2, 3, 1).contiguous())
-    ).unflatten(0, (batch_size, config.nstems))  # B, S, L
+    pred_spec = model_output.spec  # B, S*2, N, T
+    pred_audio = model_output.audio  # B, S, L
 
     with autocast('cuda'):
-        recon_loss = reconstruction_loss(pred_spec, target_spec)
+        if config.loss == 'l1':
+            recon_loss = F.l1_loss(pred_audio, target_audio)
+        elif config.loss == 'l2':
+            recon_loss = F.mse_loss(pred_audio, target_audio)
+        elif config.loss == 'smoothl1':
+            recon_loss = F.smooth_l1_loss(pred_audio, target_audio)
+        else:
+            raise ValueError(f"Unknown loss function: {config.loss}")
 
     g_loss: torch.Tensor = recon_loss + \
         config.codebook_weight * model_output.codebook_loss + \
@@ -188,16 +167,24 @@ def inference(
     snr = signal_noise_ratio(pred_audio, target_audio, zero_mean=True)
     assert target_audio.device == pred_audio.device, f"Target audio and predicted audio must be on the same device, got {target_audio.device} and {pred_audio.device}"
     assert target_audio.shape == pred_audio.shape, f"Target audio and predicted audio must have the same shape, got {target_audio.shape} and {pred_audio.shape}"
-    return model_output, pred_spec, pred_audio, recon_loss, snr, g_loss
+
+    components = {
+        "Reconstruction Loss": recon_loss.item(),
+        "Codebook Loss": model_output.codebook_loss.item(),
+        "Commitment Loss": model_output.commitment_loss.item(),
+        "Entropy Loss": model_output.entropy_loss.item(),
+        "Generator Loss": g_loss.item(),
+        "SNR": snr,
+    }
+
+    return (model_output, pred_spec, pred_audio), components, g_loss
 
 
 def validate(
     config: VAEConfig,
     model: VAE,
     val_data_loader: DataLoader,
-    reconstruction_loss: nn.Module,
     step_count: int,
-    stft: STFT
 ):
     val_count_ = 0
     if step_count % config.val_steps != (1 if config.validate_at_step_1 else 0):
@@ -205,51 +192,27 @@ def validate(
 
     model.eval()
     log_audio = None
+    val_loss_components = defaultdict(list)
     with torch.no_grad():
-        val_recon_losses = []
-        val_codebook_losses = []
-        val_commitment_losses = []
-        val_entropy_losses = []
-        val_snrs = []
         for target_audio in tqdm(val_data_loader, f"Performing validation (step={step_count})", total=min(config.val_count, len(val_data_loader))):
             val_count_ += 1
             if val_count_ > config.val_count:
                 break
 
-            model_output, pred_spec, pred_audio, recon_loss, snr, g_loss = inference(
+            (model_output, pred_spec, pred_audio), components, g_loss = inference(
                 target_audio,
                 config,
                 model,
-                stft,
-                reconstruction_loss
             )
 
-            val_recon_loss = recon_loss.item()
-            val_recon_losses.append(val_recon_loss)
-
-            val_codebook_loss = model_output.codebook_loss.item()
-            val_codebook_losses.append(val_codebook_loss)
-
-            val_commitment_loss = model_output.commitment_loss.item()
-            val_commitment_losses.append(val_commitment_loss)
-
-            val_entropy_loss = model_output.entropy_loss.item()
-            val_entropy_losses.append(val_entropy_loss)
-
-            val_snrs.append(snr)
+            for c, x in components.items():
+                val_loss_components[c].append(x)
 
             if log_audio is None:
                 log_audio = (target_audio[0], pred_audio[0, 0])
 
-    wandb.log({
-        "Val Reconstruction Loss": np.mean(val_recon_losses),
-        "Val Codebook Loss": np.mean(val_codebook_losses),
-        "Val Commitment Loss": np.mean(val_commitment_losses),
-        "Val Entropy Loss": -np.mean(val_entropy_losses),
-        "Val SNR": np.mean(val_snrs),
-    }, step=step_count)
-
-    tqdm.write(f"Validation complete: Reconstruction loss: {np.mean(val_recon_losses)}, Codebook loss: {np.mean(val_codebook_losses)}")
+    wandb.log({f"Val {c}": np.mean(x) for c, x in val_loss_components}, step=step_count)
+    tqdm.write(f"Validation complete")
 
     # Log an audio sample
     if log_audio is not None:
@@ -306,10 +269,6 @@ def train(config: VAEConfig, start_from_iter: int = 0):
 
     os.makedirs(config.output_dir, exist_ok=True)
 
-    reconstruction_loss = torch.nn.SmoothL1Loss() if config.loss == 'smooth_l1' else \
-        torch.nn.L1Loss() if config.loss == 'l1' else \
-        torch.nn.MSELoss()
-
     def warmup_lr_scheduler(optimizer, warmup_steps, base_lr):
         def lr_lambda(step):
             if step < warmup_steps:
@@ -339,8 +298,6 @@ def train(config: VAEConfig, start_from_iter: int = 0):
         model, optimizer_g, data_loader
     )
 
-    stft = STFT(config.nfft, config.ntimeframes)
-
     model.train()
 
     while True:
@@ -354,12 +311,10 @@ def train(config: VAEConfig, start_from_iter: int = 0):
                 stop_training = True
                 break
 
-            model_output, pred_spec, pred_audio, recon_loss, snr, g_loss = inference(
+            (model_output, pred_spec, pred_audio), components, g_loss = inference(
                 target_audio,
                 config,
                 model,
-                stft,
-                reconstruction_loss
             )
 
             accelerator.backward(g_loss)
@@ -368,16 +323,10 @@ def train(config: VAEConfig, start_from_iter: int = 0):
                 optimizer_g.step()
                 optimizer_g.zero_grad()
 
-            # Log losses
-            wandb.log({
-                "Reconstruction Loss": recon_loss.item(),
-                "Codebook Loss": model_output.codebook_loss.item(),
-                "Commitment Loss": model_output.commitment_loss.item(),
-                "Entropy Loss": -model_output.entropy_loss.item(),
-                "Total Generator Loss": g_loss.item() * config.autoencoder_acc_steps,  # Scale the loss back to the original scale
-                "Signal to Noise Ratio": snr,
-                "Generator Learning Rate": optimizer_g.param_groups[0]['lr'],
-            }, step=step_count)
+            losses = {c: x for c, x in components.items()}
+            losses["Total Generator Loss"] = g_loss.item() * config.autoencoder_acc_steps  # Scale the loss back to the original scale
+            losses["Generator Learning Rate"] = optimizer_g.param_groups[0]['lr']
+            wandb.log(losses, step=step_count)
 
             if step_count % config.save_steps == 0:
                 model_save_path = VAEConfig.get_vae_save_path(config, step_count)
@@ -391,9 +340,7 @@ def train(config: VAEConfig, start_from_iter: int = 0):
                     config,
                     model,
                     val_data_loader,
-                    reconstruction_loss,
                     step_count,
-                    stft
                 )
 
         # End of epoch. Clean up the gradients and losses and save the model

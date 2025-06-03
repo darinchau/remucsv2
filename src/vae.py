@@ -7,7 +7,7 @@ import torch.functional as F
 from torch import nn, Tensor
 from torch.utils.checkpoint import checkpoint
 from dataclasses import dataclass
-from AutoMasher.fyp.audio.base.audio_collection import DemucsCollection
+from .stft import STFT
 from .config import VAEConfig
 
 
@@ -26,29 +26,25 @@ class DownBlock(nn.Module):
         self.num_layers = num_layers
         self.down_sample = down_sample
         self.attn = attn
-        self.resnet_conv_first = nn.ModuleList(
-            [
-                nn.Sequential(
-                    nn.GroupNorm(norm_channels, in_channels if i == 0 else out_channels),
-                    nn.SiLU(),
-                    nn.Conv2d(in_channels if i == 0 else out_channels, out_channels,
-                              kernel_size=3, stride=1, padding=1),
-                )
-                for i in range(num_layers)
-            ]
-        )
+        self.resnet_conv_first = nn.ModuleList([
+            nn.Sequential(
+                nn.GroupNorm(norm_channels, in_channels if i == 0 else out_channels),
+                nn.SiLU(),
+                nn.Conv2d(in_channels if i == 0 else out_channels, out_channels,
+                          kernel_size=3, stride=1, padding=1),
+            )
+            for i in range(num_layers)
+        ])
 
-        self.resnet_conv_second = nn.ModuleList(
-            [
-                nn.Sequential(
-                    nn.GroupNorm(norm_channels, out_channels),
-                    nn.SiLU(),
-                    nn.Conv2d(out_channels, out_channels,
-                              kernel_size=3, stride=1, padding=1),
-                )
-                for _ in range(num_layers)
-            ]
-        )
+        self.resnet_conv_second = nn.ModuleList([
+            nn.Sequential(
+                nn.GroupNorm(norm_channels, out_channels),
+                nn.SiLU(),
+                nn.Conv2d(out_channels, out_channels,
+                          kernel_size=3, stride=1, padding=1),
+            )
+            for _ in range(num_layers)
+        ])
 
         if self.attn:
             self.attention_norms = nn.ModuleList(
@@ -61,12 +57,10 @@ class DownBlock(nn.Module):
                  for _ in range(num_layers)]
             )
 
-        self.residual_input_conv = nn.ModuleList(
-            [
-                nn.Conv2d(in_channels if i == 0 else out_channels, out_channels, kernel_size=1)
-                for i in range(num_layers)
-            ]
-        )
+        self.residual_input_conv = nn.ModuleList([
+            nn.Conv2d(in_channels if i == 0 else out_channels, out_channels, kernel_size=1)
+            for i in range(num_layers)
+        ])
         self.down_sample_conv = nn.Conv2d(out_channels, out_channels, 4, 2, 1) if self.down_sample else nn.Identity()
 
     def forward(self, x):
@@ -103,51 +97,47 @@ class MidBlock(nn.Module):
     1. Resnet block with time embedding
     2. Attention block
     3. Resnet block with time embedding
+    Input: (B, in_channels, H, W)
+    Output: (B, out_channels, H, W)
     """
 
     def __init__(self, in_channels, out_channels, num_heads, num_layers, norm_channels, use_gradient_checkpointing=False):
         super().__init__()
         self.num_layers = num_layers
         self.use_gradient_checkpointing = use_gradient_checkpointing
-        self.resnet_conv_first = nn.ModuleList(
-            [
-                nn.Sequential(
-                    nn.GroupNorm(norm_channels, in_channels if i == 0 else out_channels),
-                    nn.SiLU(),
-                    nn.Conv2d(in_channels if i == 0 else out_channels, out_channels, kernel_size=3, stride=1,
-                              padding=1),
-                )
-                for i in range(num_layers + 1)
-            ]
-        )
+        self.resnet_conv_first = nn.ModuleList([
+            nn.Sequential(
+                nn.GroupNorm(norm_channels, in_channels if i == 0 else out_channels),
+                nn.SiLU(),
+                nn.Conv2d(in_channels if i == 0 else out_channels, out_channels, kernel_size=3, stride=1,
+                          padding=1),
+            )
+            for i in range(num_layers + 1)
+        ])
 
-        self.resnet_conv_second = nn.ModuleList(
-            [
-                nn.Sequential(
-                    nn.GroupNorm(norm_channels, out_channels),
-                    nn.SiLU(),
-                    nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1),
-                )
-                for _ in range(num_layers + 1)
-            ]
-        )
+        self.resnet_conv_second = nn.ModuleList([
+            nn.Sequential(
+                nn.GroupNorm(norm_channels, out_channels),
+                nn.SiLU(),
+                nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1),
+            )
+            for _ in range(num_layers + 1)
+        ])
 
-        self.attention_norms = nn.ModuleList(
-            [nn.GroupNorm(norm_channels, out_channels)
-             for _ in range(num_layers)]
-        )
+        self.attention_norms = nn.ModuleList([
+            nn.GroupNorm(norm_channels, out_channels)
+            for _ in range(num_layers)
+        ])
 
-        self.attentions = nn.ModuleList(
-            [nn.MultiheadAttention(out_channels, num_heads, batch_first=True, bias=False)
-             for _ in range(num_layers)]
-        )
+        self.attentions = nn.ModuleList([
+            nn.MultiheadAttention(out_channels, num_heads, batch_first=True, bias=False)
+            for _ in range(num_layers)
+        ])
 
-        self.residual_input_conv = nn.ModuleList(
-            [
-                nn.Conv2d(in_channels if i == 0 else out_channels, out_channels, kernel_size=1)
-                for i in range(num_layers + 1)
-            ]
-        )
+        self.residual_input_conv = nn.ModuleList([
+            nn.Conv2d(in_channels if i == 0 else out_channels, out_channels, kernel_size=1)
+            for i in range(num_layers + 1)
+        ])
 
     def forward(self, x):
         out = x
@@ -195,50 +185,40 @@ class UpBlock(nn.Module):
         self.up_sample = up_sample
         self.attn = attn
         self.use_gradient_checkpointing = use_gradient_checkpointing
-        self.resnet_conv_first = nn.ModuleList(
-            [
-                nn.Sequential(
-                    nn.GroupNorm(norm_channels, in_channels if i == 0 else out_channels),
-                    nn.SiLU(),
-                    nn.Conv2d(in_channels if i == 0 else out_channels, out_channels, kernel_size=3, stride=1,
-                              padding=1),
-                )
-                for i in range(num_layers)
-            ]
-        )
+        self.resnet_conv_first = nn.ModuleList([
+            nn.Sequential(
+                nn.GroupNorm(norm_channels, in_channels if i == 0 else out_channels),
+                nn.SiLU(),
+                nn.Conv2d(in_channels if i == 0 else out_channels, out_channels, kernel_size=3, stride=1,
+                          padding=1),
+            )
+            for i in range(num_layers)
+        ])
 
-        self.resnet_conv_second = nn.ModuleList(
-            [
-                nn.Sequential(
-                    nn.GroupNorm(norm_channels, out_channels),
-                    nn.SiLU(),
-                    nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1),
-                )
-                for _ in range(num_layers)
-            ]
-        )
+        self.resnet_conv_second = nn.ModuleList([
+            nn.Sequential(
+                nn.GroupNorm(norm_channels, out_channels),
+                nn.SiLU(),
+                nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1),
+            )
+            for _ in range(num_layers)
+        ])
 
         if self.attn:
-            self.attention_norms = nn.ModuleList(
-                [
-                    nn.GroupNorm(norm_channels, out_channels)
-                    for _ in range(num_layers)
-                ]
-            )
+            self.attention_norms = nn.ModuleList([
+                nn.GroupNorm(norm_channels, out_channels)
+                for _ in range(num_layers)
+            ])
 
-            self.attentions = nn.ModuleList(
-                [
-                    nn.MultiheadAttention(out_channels, num_heads, batch_first=True, bias=False)
-                    for _ in range(num_layers)
-                ]
-            )
+            self.attentions = nn.ModuleList([
+                nn.MultiheadAttention(out_channels, num_heads, batch_first=True, bias=False)
+                for _ in range(num_layers)
+            ])
 
-        self.residual_input_conv = nn.ModuleList(
-            [
-                nn.Conv2d(in_channels if i == 0 else out_channels, out_channels, kernel_size=1)
-                for i in range(num_layers)
-            ]
-        )
+        self.residual_input_conv = nn.ModuleList([
+            nn.Conv2d(in_channels if i == 0 else out_channels, out_channels, kernel_size=1)
+            for i in range(num_layers)
+        ])
 
         # Add one to the final conv transpose to make it 2n + 1
         if not self.up_sample:
@@ -328,13 +308,14 @@ class QuantizeModule(nn.Module):
         return quant_out, quantize_losses, min_encoding_indices
 
 
+@dataclass
 class VAEOutput:
-    def __init__(self, output: Tensor, z: Tensor, codebook_loss: Tensor, commitment_loss: Tensor, entropy_loss: Tensor):
-        self.output = output
-        self.z = z
-        self.codebook_loss = codebook_loss
-        self.commitment_loss = commitment_loss
-        self.entropy_loss = entropy_loss
+    audio: Tensor
+    spec: Tensor
+    z: Tensor
+    codebook_loss: Tensor
+    commitment_loss: Tensor
+    entropy_loss: Tensor
 
 
 class RVQVAE(nn.Module):
@@ -351,6 +332,28 @@ class RVQVAE(nn.Module):
         self.up_sample = list(reversed(self.config.down_sample))
         self.init_encoder()
         self.init_decoder()
+
+    def _spec(self, x: Tensor):
+        """Convert audio to spectrogram."""
+        # Audio shape: B, S, L
+        b, s, l = x.shape
+        stft = STFT(self.config.nfft, self.config.ntimeframes)
+        target_spec = stft.forward(
+            x.float().flatten(0, 1)  # B*S, L
+        )
+        target_spec = torch.view_as_real(target_spec).permute(0, 3, 1, 2)  # B*S, 2, N, T
+        target_spec = target_spec.unflatten(0, (b, self.config.nstems)).flatten(1, 2).float().to(x.device)  # B, S*2, N, T
+        return target_spec
+
+    def _audio(self, z: Tensor):
+        # Spec shape: B, S*2, N, T
+        b, s2, n, t = z.shape
+        s = s2 // 2
+        stft = STFT(self.config.nfft, self.config.ntimeframes)
+        pred_audio = stft.inverse(
+            torch.view_as_complex(z.float().unflatten(1, (self.config.nstems, 2)).flatten(0, 1).permute(0, 2, 3, 1).contiguous())
+        ).unflatten(0, (b, self.config.nstems))  # B, S, L
+        return pred_audio
 
     def init_encoder(self):
         self.encoder_conv_in = nn.Conv2d(self.config.nsources, self.config.down_channels[0], kernel_size=3, padding=(1, 1))
@@ -472,10 +475,12 @@ class RVQVAE(nn.Module):
         return out
 
     def forward(self, x):
+        x = self._spec(x)
         z, quant_losses = self.encode(x)
         out = self.decode(z)
         return VAEOutput(
-            output=out,
+            audio=self._audio(out),
+            spec=out,
             z=z,
             codebook_loss=quant_losses["codebook_loss"],  # type: ignore
             commitment_loss=quant_losses["commitment_loss"],  # type: ignore

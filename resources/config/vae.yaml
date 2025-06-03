@@ -1,7 +1,7 @@
 # Config file for autoencoder training
 
 ## Dataset parameters
-separator: "12_SP-UVR-3B-44100.pth"               # Separator model to use for training.
+separator: "14_SP-UVR-4B-44100-2.pth"               # Separator model to use for training.
 nstems: 2                                         # Number of stems in the dataset. Has to be adjusted according to the dataset.
 dataset_dir: "E:/audio"                           # Directory containing the dataset
 output_dir: "E:/output"                           # Directory to save the trained models and checkpoints
@@ -31,7 +31,7 @@ num_workers_dl: 0                                 # Number of workers for data l
 batch_size: 2                                     # Batch size for autoencoder training
 codebook_weight: 1                                # Weight of codebook loss
 commitment_beta: 0.2                              # Weight of commitment loss
-entropy_weight: 0.01                              # Weight of entropy loss
+entropy_weight: 0.00                              # Weight of entropy loss
 p_skip_quantization: 0.1                          # Probability of skipping quantization during the training step to ensure efficient gradient flow
 steps: 10000                                      # Number of training steps to perform in total
 autoencoder_lr: 0.00001                           # Learning rate for the autoencoder
