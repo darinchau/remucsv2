@@ -306,7 +306,9 @@ def train(config: VAEConfig, start_from_iter: int = 0):
 
     os.makedirs(config.output_dir, exist_ok=True)
 
-    reconstruction_loss = torch.nn.MSELoss()
+    reconstruction_loss = torch.nn.SmoothL1Loss() if config.loss == 'smooth_l1' else \
+        torch.nn.L1Loss() if config.loss == 'l1' else \
+        torch.nn.MSELoss()
 
     def warmup_lr_scheduler(optimizer, warmup_steps, base_lr):
         def lr_lambda(step):

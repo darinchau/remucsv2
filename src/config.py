@@ -49,6 +49,7 @@ class VAEConfig:
     autoencoder_lr: float
     autoencoder_acc_steps: int
     save_steps: int
+    loss: str
     ckpt_name: str
     run_name: str
     val_steps: int
