@@ -24,7 +24,6 @@ from src.audio import YouTubeURL, Audio
 from src.modules import BiModalRVQVAE as VAE, VAEOutput, MultiBandLoss
 from src.vggish import Vggish
 from src.config import VAEConfig
-from src.stft import STFT
 from src.separate import Separator
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')

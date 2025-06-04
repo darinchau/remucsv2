@@ -11,7 +11,6 @@ import typing
 from torch import nn, Tensor
 from torch.utils.checkpoint import checkpoint
 from dataclasses import dataclass
-from .stft import STFT
 from .config import VAEConfig
 
 
