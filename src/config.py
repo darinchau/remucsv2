@@ -62,7 +62,7 @@ class VAEConfig:
     def audio_length(self) -> int:
         """Sometimes we want to define the audio length in terms of spectrogram dimensions
         This provides a consistent getter for the audio length"""
-        return self.audio_length
+        return self.length
 
     @staticmethod
     def load(file_path: str) -> 'VAEConfig':

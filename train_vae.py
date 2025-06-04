@@ -1,3 +1,4 @@
+import line_profiler
 import audiofile as af
 import argparse
 import torch
@@ -20,7 +21,7 @@ from accelerate import Accelerator
 from math import isclose
 
 from src.audio import YouTubeURL, Audio
-from src.modules import BiModalRVQVAE as VAE, VAEOutput
+from src.modules import BiModalRVQVAE as VAE, VAEOutput, MultiBandLoss
 from src.vggish import Vggish
 from src.config import VAEConfig
 from src.stft import STFT
@@ -77,7 +78,12 @@ class VAEDataset(torch.utils.data.Dataset):
         separated_audio = [a.resample(self.config.sample_rate)
                             .pad(self.config.audio_length, warn=1024)
                             .to_nchannels(2) for a in separated_audio]
-        thing = torch.stack([a.data[take_left_channel] for a in separated_audio], dim=0)  # shape: S, L
+        audio = audio \
+            .resample(self.config.sample_rate) \
+            .pad(self.config.audio_length, warn=1024) \
+            .to_nchannels(2)
+        separated_audio.append(audio)
+        thing = torch.stack([a.data[take_left_channel] for a in separated_audio], dim=0)  # shape: S+1, L
         return thing
 
 
@@ -121,43 +127,40 @@ def inference(
     target_audio: Tensor,
     config: VAEConfig,
     model: VAE,
+    recon_loss: nn.Module
 ):
     assert isinstance(target_audio, torch.Tensor)
     assert target_audio.dim() == 3
-    assert target_audio.shape == (config.batch_size, config.nstems, config.audio_length), \
-        f"Expected target audio shape to be ({config.batch_size}, {config.nstems}, {config.audio_length}), " \
-        f"but got {target_audio.shape}"
 
+    input_audio = target_audio[:, :-1]  # Remove the last channel which is the real audio
+    target_audio = target_audio[:, -1]
+    assert input_audio.shape == (config.batch_size, config.nstems, config.audio_length), \
+        f"Expected target audio shape to be ({config.batch_size}, {config.nstems}, {config.audio_length}), " \
+        f"but got {input_audio.shape}"
+
+    input_audio = input_audio.float().to(device)
     target_audio = target_audio.float().to(device)
 
     # Fetch autoencoders output(reconstructions)
     with autocast('cuda'):
-        model_output: VAEOutput = model(target_audio)
+        model_output: VAEOutput = model(input_audio)
 
-    pred_audio = model_output.audio  # B, S, L
+    pred_audio = model_output.audio  # B, L
+    assert target_audio.device == pred_audio.device, f"Target audio and predicted audio must be on the same device, got {target_audio.device} and {pred_audio.device}"
+    assert target_audio.shape == pred_audio.shape, f"Target audio and predicted audio must have the same shape, got {target_audio.shape} and {pred_audio.shape}"
 
-    with autocast('cuda'):
-        if config.loss == 'l1':
-            recon_loss = F.l1_loss(pred_audio, target_audio)
-        elif config.loss == 'l2':
-            recon_loss = F.mse_loss(pred_audio, target_audio)
-        elif config.loss == 'smoothl1':
-            recon_loss = F.smooth_l1_loss(pred_audio, target_audio)
-        else:
-            raise ValueError(f"Unknown loss function: {config.loss}")
+    loss = recon_loss(pred_audio, target_audio)
 
-    g_loss: torch.Tensor = recon_loss + \
+    g_loss: torch.Tensor = loss + \
         config.codebook_weight * model_output.codebook_loss + \
         config.commitment_beta * model_output.commitment_loss + \
         config.entropy_weight * model_output.entropy_loss
     g_loss /= config.autoencoder_acc_steps
 
     snr = signal_noise_ratio(pred_audio, target_audio, zero_mean=True)
-    assert target_audio.device == pred_audio.device, f"Target audio and predicted audio must be on the same device, got {target_audio.device} and {pred_audio.device}"
-    assert target_audio.shape == pred_audio.shape, f"Target audio and predicted audio must have the same shape, got {target_audio.shape} and {pred_audio.shape}"
 
     components: dict[str, float] = {
-        "Reconstruction Loss": recon_loss.item(),
+        "Reconstruction Loss": loss.item(),
         "Codebook Loss": model_output.codebook_loss.item(),
         "Commitment Loss": model_output.commitment_loss.item(),
         "Entropy Loss": model_output.entropy_loss.item(),
@@ -172,6 +175,7 @@ def validate(
     config: VAEConfig,
     model: VAE,
     val_data_loader: DataLoader,
+    recon_loss: nn.Module,
     step_count: int,
 ):
     val_count_ = 0
@@ -191,25 +195,27 @@ def validate(
                 target_audio,
                 config,
                 model,
+                recon_loss
             )
-            pred_audio = model_output.audio  # B, 1, L
+            pred_audio = model_output.audio  # B, L
 
             for c, x in components.items():
                 val_loss_components[c].append(x)
 
             if log_audio is None:
-                log_audio = (target_audio[0], pred_audio[0, 0])
+                log_audio = (target_audio[0], pred_audio[0])
 
-    wandb.log({f"Val {c}": np.mean(x) for c, x in val_loss_components}, step=step_count)
+    wandb.log({f"Val {c}": np.mean(x) for c, x in val_loss_components.items()}, step=step_count)
     tqdm.write(f"Validation complete")
 
     # Log an audio sample
     if log_audio is not None:
         target_audio, pred_audio = log_audio
+        assert target_audio.dim() == 2 and pred_audio.dim() == 1, f"Target and predicted audio must be 1D tensors, got {target_audio.dim()} and {pred_audio.dim()}"
         log_audios = {}
         for i in range(len(target_audio)):
-            log_audios[f"target_{i + 1}"] = wandb.Audio(target_audio[i].cpu().numpy(), sample_rate=config.sample_rate, caption=f"Target Channel {i + 1}")
-        log_audios["predicted"] = wandb.Audio(pred_audio.cpu().numpy(), sample_rate=config.sample_rate, caption="Predicted Audio")
+            log_audios[f"target_{i + 1}"] = wandb.Audio(target_audio[i].float().cpu().numpy(), sample_rate=config.sample_rate, caption=f"Target Channel {i + 1}")
+        log_audios["predicted"] = wandb.Audio(pred_audio.float().cpu().numpy(), sample_rate=config.sample_rate, caption="Predicted Audio")
         wandb.log({
             "Validation Audio": log_audios
         }, step=step_count)
@@ -287,6 +293,8 @@ def train(config: VAEConfig, start_from_iter: int = 0):
         model, optimizer_g, data_loader
     )
 
+    recon_loss = MultiBandLoss(config.bands).to(device)
+
     model.train()
 
     while True:
@@ -304,6 +312,7 @@ def train(config: VAEConfig, start_from_iter: int = 0):
                 target_audio,
                 config,
                 model,
+                recon_loss
             )
 
             accelerator.backward(g_loss)
@@ -329,6 +338,7 @@ def train(config: VAEConfig, start_from_iter: int = 0):
                     config,
                     model,
                     val_data_loader,
+                    recon_loss,
                     step_count,
                 )
 

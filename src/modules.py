@@ -7,11 +7,16 @@ import torch
 import torchaudio
 import torch.functional as F
 import torch.nn.functional as NF
+import typing
 from torch import nn, Tensor
 from torch.utils.checkpoint import checkpoint
 from dataclasses import dataclass
 from .stft import STFT
 from .config import VAEConfig
+
+
+def _activation():
+    return nn.LeakyReLU(0.2)
 
 
 class DownBlock1D(nn.Module):
@@ -34,6 +39,7 @@ class DownBlock1D(nn.Module):
         num_layers: int,
         attn: bool,
         norm_channels: int,
+        activation: typing.Callable[[], nn.Module] = _activation,
         use_gradient_checkpointing: bool = False
     ):
         super().__init__()
@@ -46,7 +52,7 @@ class DownBlock1D(nn.Module):
         self.resnet_conv_first = nn.ModuleList([
             nn.Sequential(
                 nn.GroupNorm(norm_channels, in_channels if i == 0 else out_channels),
-                nn.SiLU(),
+                activation(),
                 nn.Conv1d(in_channels if i == 0 else out_channels, out_channels,
                           kernel_size=3, stride=1, padding=1),
             )
@@ -57,7 +63,7 @@ class DownBlock1D(nn.Module):
         self.resnet_conv_second = nn.ModuleList([
             nn.Sequential(
                 nn.GroupNorm(norm_channels, out_channels),
-                nn.SiLU(),
+                activation(),
                 nn.Conv1d(out_channels, out_channels,
                           kernel_size=3, stride=1, padding=1),
             )
@@ -144,6 +150,7 @@ class MidBlock1D(nn.Module):
         num_heads: int,
         num_layers: int,
         norm_channels: int,
+        activation: typing.Callable[[], nn.Module] = _activation,
         use_gradient_checkpointing: bool = False
     ):
         super().__init__()
@@ -155,7 +162,7 @@ class MidBlock1D(nn.Module):
         self.resnet_conv_first = nn.ModuleList([
             nn.Sequential(
                 nn.GroupNorm(norm_channels, in_channels if i == 0 else out_channels),
-                nn.SiLU(),
+                activation(),
                 nn.Conv1d(in_channels if i == 0 else out_channels, out_channels,
                           kernel_size=3, stride=1, padding=1),
             )
@@ -165,7 +172,7 @@ class MidBlock1D(nn.Module):
         self.resnet_conv_second = nn.ModuleList([
             nn.Sequential(
                 nn.GroupNorm(norm_channels, out_channels),
-                nn.SiLU(),
+                activation(),
                 nn.Conv1d(out_channels, out_channels, kernel_size=3, stride=1, padding=1),
             )
             for _ in range(num_layers + 1)
@@ -251,6 +258,7 @@ class UpBlock1D(nn.Module):
         num_layers: int,
         attn: bool,
         norm_channels: int,
+        activation: typing.Callable[[], nn.Module] = _activation,
         use_gradient_checkpointing: bool = False
     ):
         super().__init__()
@@ -263,13 +271,13 @@ class UpBlock1D(nn.Module):
         if not self.up_sample_factor > 1:
             self.up_sample_conv = nn.Identity()
         else:
-            self.up_sample_conv = nn.ConvTranspose1d(in_channels, in_channels, kernel_size=self.up_sample_factor*2, stride=self.up_sample_factor, padding=self.up_sample_factor-1)
+            self.up_sample_conv = nn.ConvTranspose1d(in_channels, in_channels, kernel_size=self.up_sample_factor, stride=self.up_sample_factor)
 
         # ResNet convolutional layers
         self.resnet_conv_first = nn.ModuleList([
             nn.Sequential(
                 nn.GroupNorm(norm_channels, in_channels if i == 0 else out_channels),
-                nn.SiLU(),
+                activation(),
                 nn.Conv1d(in_channels if i == 0 else out_channels, out_channels,
                           kernel_size=3, stride=1, padding=1),
             )
@@ -279,7 +287,7 @@ class UpBlock1D(nn.Module):
         self.resnet_conv_second = nn.ModuleList([
             nn.Sequential(
                 nn.GroupNorm(norm_channels, out_channels),
-                nn.SiLU(),
+                activation(),
                 nn.Conv1d(out_channels, out_channels, kernel_size=3, stride=1, padding=1),
             )
             for _ in range(num_layers)
@@ -341,8 +349,8 @@ class UpBlock1D(nn.Module):
         return out
 
 
-class QuantizeModule(nn.Module):
-    """Takes in x of shape (B, C, L) and returns quantized output and indices
+class QuantizeModule1D(nn.Module):
+    """Takes in x of shape (B, C=z_channels, L) and returns quantized output and indices
 
     Returns:
         quant_out: Tensor of shape (B, C, L)
@@ -388,6 +396,56 @@ class QuantizeModule(nn.Module):
         return quant_out, quantize_losses, min_encoding_indices
 
 
+class QuantizeModule2D(nn.Module):
+    """Takes in x of shape (B, C=z_channels, H, W) and returns quantized output and indices
+
+    Returns:
+        quant_out: Tensor of shape (B, C, H, W)
+        quantize_losses: dict with 'codebook_loss' and 'commitment_loss'
+        min_encoding_indices: Tensor of shape (B, H, W)
+    """
+
+    def __init__(self, codebook_size: int, z_channels: int):
+        super().__init__()
+        self.codebook = nn.Embedding(codebook_size, z_channels)
+
+    def forward(self, x: torch.Tensor):
+        B, C, H, W = x.shape
+        assert C == self.codebook.embedding_dim, f"Expected C={self.codebook.embedding_dim}, got {C} (x.shape={x.shape})"
+
+        # B, C, H, W -> B, H, W, C
+        x = x.permute(0, 2, 3, 1)
+
+        # B, H, W, C -> B, H*W, C
+        x = x.reshape(x.size(0), -1, x.size(-1))
+
+        # Find nearest embedding/codebook vector
+        # dist between (B, H*W, C) and (B, K, C) -> (B, H*W, K)
+        dist = torch.cdist(x, self.codebook.weight[None, :].repeat((x.size(0), 1, 1)))
+        # (B, H*W)
+        min_encoding_indices = torch.argmin(dist, dim=-1)
+
+        # Replace encoder output with nearest codebook
+        # quant_out -> B*H*W, C
+        quant_out = torch.index_select(self.codebook.weight, 0, min_encoding_indices.view(-1))
+
+        # x -> B*H*W, C
+        x = x.reshape((-1, x.size(-1)))
+        commmitment_loss = torch.mean((quant_out.detach() - x) ** 2)
+        codebook_loss = torch.mean((quant_out - x.detach()) ** 2)
+        quantize_losses = {
+            'codebook_loss': codebook_loss,
+            'commitment_loss': commmitment_loss
+        }
+        # Straight through estimation
+        quant_out = x + (quant_out - x).detach()
+
+        # quant_out -> B, C, H, W
+        quant_out = quant_out.reshape((B, H, W, C)).permute(0, 3, 1, 2)
+        min_encoding_indices = min_encoding_indices.reshape((B, H, W))
+        return quant_out, quantize_losses, min_encoding_indices
+
+
 class MultiBandLoss(nn.Module):
     """Multi-band loss.
     This loss is used to train the VQVAE model.
@@ -395,16 +453,18 @@ class MultiBandLoss(nn.Module):
     Audios must be of the same shape in (..., L) format.
     """
 
-    def __init__(self, config: VAEConfig):
+    def __init__(self, band: typing.Iterable[int] = (128, 256, 512, 1024)):
         super().__init__()
-        self.config = config
+        self.specs = nn.ModuleList([
+            torchaudio.transforms.Spectrogram(n_fft=band_size, power=1.0)
+            for band_size in band
+        ])
 
     def forward(self, target_audio: Tensor, output_audio: Tensor):
-        assert target_audio.shape == output_audio.shape, "Target and output audio must have the same shape"
+        assert target_audio.shape == output_audio.shape, f"Target and output audio must have the same shape, got {target_audio.shape} and {output_audio.shape}"
         eps = 1e-10
         losses = []
-        for band in self.config.bands:
-            spec = torchaudio.transforms.Spectrogram(band, power=1.0)
+        for spec in self.specs:
             target_band = spec(target_audio)
             output_band = spec(output_audio)
             loss = NF.l1_loss(target_band, output_band) + NF.l1_loss(torch.log(target_band + eps), torch.log(output_band + eps))
@@ -467,11 +527,11 @@ class BiModalRVQVAE(nn.Module):
         self.encoder_conv_out = nn.Conv1d(self.config.down_channels[-1], self.config.z_channels, kernel_size=3, padding=1)
 
         # Pre Quantization Convolution
-        self.pre_quant_conv = nn.Conv2d(self.config.z_channels, self.config.z_channels, kernel_size=1)
+        self.pre_quant_conv = nn.Conv1d(self.config.z_channels, self.config.z_channels, kernel_size=1)
 
         # Codebook
         self.quants = nn.ModuleList([
-            QuantizeModule(codebook_size=self.config.codebook_size, z_channels=self.config.z_channels)
+            QuantizeModule2D(codebook_size=self.config.codebook_size, z_channels=self.config.z_channels)
             for _ in range(self.config.nquantizers)
         ])
 
@@ -508,7 +568,7 @@ class BiModalRVQVAE(nn.Module):
             ))
 
         self.decoder_norm_out = nn.GroupNorm(self.config.norm_channels, self.config.down_channels[0])
-        self.decoder_conv_out = nn.Conv2d(self.config.down_channels[0], 1, kernel_size=3, padding=1)
+        self.decoder_conv_out = nn.Conv1d(self.config.down_channels[0], 1, kernel_size=1, padding=0)
 
     def encode(self, x: Tensor):
         # x: (B, S, L)
@@ -520,12 +580,12 @@ class BiModalRVQVAE(nn.Module):
         for mid in self.encoder_mids:
             out = mid(out)
         out = self.encoder_norm_out(out)
-        out = nn.SiLU()(out)
+        out = _activation()(out)
         out = self.encoder_conv_out(out)
         out = self.pre_quant_conv(out)
         # out: (B * S, z_channels, L') where L' is the length after downsampling
-        out = out.reshape((B, S, self.config.z_channels, -1))
-        # out: (B, S, z_channels, L')
+        out = out.reshape((B, S, self.config.z_channels, -1)).permute(0, 2, 1, 3)
+        # out: (B, z_channels, S, L')
         quant_losses = {
             "codebook_loss": torch.tensor(0.0, device=x.device),
             "commitment_loss": torch.tensor(0.0, device=x.device),
@@ -545,6 +605,7 @@ class BiModalRVQVAE(nn.Module):
                 else:
                     out += quant_out
                 residual -= quant_out
+        out = out.permute(0, 2, 1, 3)
         return out, quant_losses
 
     def decode(self, z: Tensor):
@@ -553,18 +614,20 @@ class BiModalRVQVAE(nn.Module):
         assert S == self.config.nstems, f"Expected nstems {self.config.nstems}, got {S}"
         assert B == self.config.batch_size, f"Expected batch size {self.config.batch_size}, got {B}"
         # B, S, Z, L' -> B, S * Z, L'
-        z = self.merge_sz(z).squeeze(2).contiguous()
-        z = self.post_quant_conv(z)
-        z = self.decoder_conv_in(z)
+        out = self.merge_sz(z).squeeze(2).contiguous()
+        out = self.post_quant_conv(out)
+        out = self.decoder_conv_in(out)
         for mid in self.decoder_mids:
-            z = mid(z)
+            out = mid(out)
         for idx, up in enumerate(self.decoder_layers):
-            z = up(z)
+            out = up(out)
 
-        z = self.decoder_norm_out(z)
-        z = nn.SiLU()(z)
-        z = self.decoder_conv_out(z)
-        return z
+        out = self.decoder_norm_out(out)
+        out = _activation()(out)
+        out = self.decoder_conv_out(out)
+        # (B, 1, L) -> (B, L)
+        out.squeeze_(1)
+        return out
 
     def forward(self, x):
         # x: (B, S, L)
@@ -580,8 +643,34 @@ class BiModalRVQVAE(nn.Module):
 
 
 def test_up_block_1d():
-    up_block = UpBlock1D(64, 32, 2, 2, 2, False, 2, True)
-    input_tensor = torch.randn(1, 64, 16)
-    output_tensor = up_block(input_tensor)
-    assert output_tensor.shape == (1, 32, 32), f"Output shape mismatch: {output_tensor.shape}"
-    print("UpBlock1D test passed successfully.")
+    def test(factor: int):
+        block = UpBlock1D(
+            in_channels=64,
+            out_channels=64,
+            up_sample=factor,
+            num_heads=8,
+            num_layers=2,
+            attn=True,
+            norm_channels=32,
+            use_gradient_checkpointing=False
+        )
+        input_tensor = torch.randn(1, 64, 720)
+        output_tensor = block(input_tensor)
+        assert output_tensor.shape == (1, 64, 720 * factor), f"Output shape mismatch: {output_tensor.shape}, expected {(1, 64, 720 * factor)} (factor={factor})"
+        print("UpBlock1D test passed successfully.")
+
+    for i in range(2, 100):
+        test(i)
+    print("All tests passed.")
+
+
+def test_down_block_1d():
+    def test(factor: int):
+        downblock = nn.Conv1d(64, 64, kernel_size=2*factor, stride=factor, padding=factor-1)
+        input_tensor = torch.randn(1, 64, factor*720)
+        output_tensor = downblock(input_tensor)
+        assert output_tensor.shape == (1, 64, 720), f"Output shape mismatch: {output_tensor.shape}, expected (1, 64, 720) (factor={factor})"
+
+    for i in range(2, 100):
+        test(i)
+    print("All tests passed.")
