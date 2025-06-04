@@ -37,7 +37,6 @@ class VAEConfig:
     num_up_layers: int
 
     seed: int
-    single_stem_training: bool
     gradient_checkpointing: bool
     num_workers_dl: int
     batch_size: int
@@ -58,13 +57,6 @@ class VAEConfig:
     validate_at_step_1: bool
 
     _run_id: str = field(init=False, repr=False, default_factory=lambda: get_random_string())
-
-    def __post_init__(self):
-        if self.single_stem_training and self.nstems != 1:
-            warnings.warn(
-                "Single stem training is enabled. This will only train on the first stem of the dataset."
-            )
-            object.__setattr__(self, 'nstems', 1)
 
     @property
     def audio_length(self) -> int:
