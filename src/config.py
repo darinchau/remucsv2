@@ -21,11 +21,11 @@ class VAEConfig:
     output_dir: str
     val_count: int
     sample_rate: int
-    ntimeframes: int
-    nfft: int
+    length: int
 
     codebook_size: int
     nquantizers: int
+    z_channels: int
     down_channels: tuple[int, ...]
     mid_channels: tuple[int, ...]
     down_sample: tuple[int, ...]
@@ -44,6 +44,7 @@ class VAEConfig:
     codebook_weight: float
     commitment_beta: float
     entropy_weight: float
+    bands: tuple[int, ...]
     p_skip_quantization: float
     steps: int
     autoencoder_lr: float
@@ -66,20 +67,10 @@ class VAEConfig:
             object.__setattr__(self, 'nstems', 1)
 
     @property
-    def nsources(self):
-        """Returns the number of spectrograms that we will work with
-        Different from nstems in the sense that it is the number of channels for the VAE input
-        which could be different from the number of stems in the dataset."""
-        return self.nstems * 2
-
-    @property
-    def z_channels(self) -> int:
-        """Number of conv channels in the latent space."""
-        return self.nstems
-
-    @property
     def audio_length(self) -> int:
-        return STFT(self.nfft, self.ntimeframes).l
+        """Sometimes we want to define the audio length in terms of spectrogram dimensions
+        This provides a consistent getter for the audio length"""
+        return self.audio_length
 
     @staticmethod
     def load(file_path: str) -> 'VAEConfig':

@@ -20,7 +20,7 @@ from accelerate import Accelerator
 from math import isclose
 
 from src.audio import YouTubeURL, Audio
-from src.vae import RVQVAE as VAE, VAEOutput
+from src.modules import BiModalRVQVAE as VAE, VAEOutput
 from src.vggish import Vggish
 from src.config import VAEConfig
 from src.stft import STFT
@@ -136,16 +136,16 @@ def inference(
 ):
     assert isinstance(target_audio, torch.Tensor)
     assert target_audio.dim() == 3
-    assert target_audio.shape[1] == config.nstems
+    assert target_audio.shape == (config.batch_size, config.nstems, config.audio_length), \
+        f"Expected target audio shape to be ({config.batch_size}, {config.nstems}, {config.audio_length}), " \
+        f"but got {target_audio.shape}"
 
-    batch_size = target_audio.shape[0]
     target_audio = target_audio.float().to(device)
 
     # Fetch autoencoders output(reconstructions)
     with autocast('cuda'):
         model_output: VAEOutput = model(target_audio)
 
-    pred_spec = model_output.spec  # B, S*2, N, T
     pred_audio = model_output.audio  # B, S, L
 
     with autocast('cuda'):
@@ -168,7 +168,7 @@ def inference(
     assert target_audio.device == pred_audio.device, f"Target audio and predicted audio must be on the same device, got {target_audio.device} and {pred_audio.device}"
     assert target_audio.shape == pred_audio.shape, f"Target audio and predicted audio must have the same shape, got {target_audio.shape} and {pred_audio.shape}"
 
-    components = {
+    components: dict[str, float] = {
         "Reconstruction Loss": recon_loss.item(),
         "Codebook Loss": model_output.codebook_loss.item(),
         "Commitment Loss": model_output.commitment_loss.item(),
@@ -177,7 +177,7 @@ def inference(
         "SNR": snr,
     }
 
-    return (model_output, pred_spec, pred_audio), components, g_loss
+    return model_output, components, g_loss
 
 
 def validate(
@@ -199,11 +199,12 @@ def validate(
             if val_count_ > config.val_count:
                 break
 
-            (model_output, pred_spec, pred_audio), components, g_loss = inference(
+            model_output, components, g_loss = inference(
                 target_audio,
                 config,
                 model,
             )
+            pred_audio = model_output.audio  # B, 1, L
 
             for c, x in components.items():
                 val_loss_components[c].append(x)
@@ -311,7 +312,7 @@ def train(config: VAEConfig, start_from_iter: int = 0):
                 stop_training = True
                 break
 
-            (model_output, pred_spec, pred_audio), components, g_loss = inference(
+            _, components, g_loss = inference(
                 target_audio,
                 config,
                 model,

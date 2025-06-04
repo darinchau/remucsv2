@@ -1,21 +1,21 @@
 # Config file for autoencoder training
 
 ## Dataset parameters
-separator: "14_SP-UVR-4B-44100-2.pth"               # Separator model to use for training.
+separator: "14_SP-UVR-4B-44100-2.pth"             # Separator model to use for training.
 nstems: 2                                         # Number of stems in the dataset. Has to be adjusted according to the dataset.
 dataset_dir: "E:/audio"                           # Directory containing the dataset
 output_dir: "E:/output"                           # Directory to save the trained models and checkpoints
 val_count: 100                                    # Number of validation samples
 sample_rate: 44100                                # Sample rate of the audio
-ntimeframes: 512                                  # Number of time frames in the spectrogram
-nfft: 1025                                        # Number of features in the spectrogram. Relation with the usual nfft is this = (nfft / 2) + 1
+length: 131072                                    # Length of each audio sample in samples (5s)
 
 ## Model parameters
 codebook_size: 4096                               # Size of each codebook for VQ-VAE
 nquantizers: 4                                    # Number of quantizers in the RVQ component
+z_channels: 128                                   # Number of channels in the latent space
 down_channels : [64, 128, 256, 256]               # Number of channels in each downsampling layer
 mid_channels : [256, 256]                         # Number of channels in each middle layer
-down_sample : [2, 2, 4]                           # Downsampling factors for each downsampling layer
+down_sample : [4, 4, 8]                           # Downsampling factors for each downsampling layer
 attn_down : [False, False, False]                 # Whether to use attention in each downsampling layer
 norm_channels: 32                                 # Number of channels for normalization
 num_heads: 4                                      # Number of attention heads
@@ -25,13 +25,14 @@ num_up_layers : 2                                 # Number of upsampling layers
 
 ## Training parameters
 seed : 1943                                       # Random seed
-single_stem_training: False                        # Whether to train on single stem or multi-stem
+single_stem_training: False                       # Whether to train on single stem or multi-stem
 gradient_checkpointing: True                      # Whether to use gradient checkpointing
 num_workers_dl: 0                                 # Number of workers for data loading
 batch_size: 2                                     # Batch size for autoencoder training
 codebook_weight: 1                                # Weight of codebook loss
 commitment_beta: 0.2                              # Weight of commitment loss
 entropy_weight: 0.00                              # Weight of entropy loss
+bands: [2048, 1024, 512, 256, 128, 64]            # Bands to use for the Multiband Spectral Loss
 p_skip_quantization: 0.1                          # Probability of skipping quantization during the training step to ensure efficient gradient flow
 steps: 10000                                      # Number of training steps to perform in total
 autoencoder_lr: 0.00001                           # Learning rate for the autoencoder
