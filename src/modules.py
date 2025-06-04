@@ -464,7 +464,7 @@ class MultiBandLoss(nn.Module):
             output_band = spec(output_audio)
             loss = NF.l1_loss(target_band, output_band) + NF.l1_loss(torch.log(target_band + eps), torch.log(output_band + eps))
             losses.append(loss)
-        return torch.mean(torch.stack(losses))
+        return torch.sum(torch.stack(losses))
 
 
 @dataclass
@@ -607,7 +607,6 @@ class BiModalRVQVAE(nn.Module):
         B, S, Z, L_ = z.shape
         assert Z == self.config.z_channels, f"Expected z_channels {self.config.z_channels}, got {Z}"
         assert S == self.config.nstems, f"Expected nstems {self.config.nstems}, got {S}"
-        assert B == self.config.batch_size, f"Expected batch size {self.config.batch_size}, got {B}"
         # B, S, Z, L' -> B, S * Z, L'
         out = self.merge_sz(z).squeeze(2).contiguous()
         out = self.post_quant_conv(out)
