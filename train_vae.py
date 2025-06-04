@@ -132,8 +132,8 @@ def inference(
 
     input_audio = target_audio[:, :-1]  # Remove the last channel which is the real audio
     target_audio = target_audio[:, -1]
-    assert input_audio.shape == (config.batch_size, config.nstems, config.audio_length), \
-        f"Expected target audio shape to be ({config.batch_size}, {config.nstems}, {config.audio_length}), " \
+    assert input_audio.shape[1:] == (config.nstems, config.audio_length), \
+        f"Expected target audio shape to be (_, {config.nstems}, {config.audio_length}), " \
         f"but got {input_audio.shape}"
 
     input_audio = input_audio.float().to(device)
@@ -248,7 +248,7 @@ def train(config: VAEConfig, start_from_iter: int = 0):
         im_dataset,
         batch_size=config.batch_size,
         num_workers=config.num_workers_dl,
-        shuffle=True
+        shuffle=True,
     )
 
     val_data_loader = DataLoader(
