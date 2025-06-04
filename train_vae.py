@@ -68,7 +68,6 @@ class VAEDataset(torch.utils.data.Dataset):
             separated_audio = separator.separate(audio)
         except Exception as e:
             # There is a small but nonzero chance that the audio cannot be read after it is separated
-            print(f"Error separating audio from {path}: {e}")
             return self.__getitem__(random.randint(0, len(self.paths) - 1))
         if len(separated_audio) != self.config.nstems:
             raise ValueError(
@@ -153,8 +152,7 @@ def inference(
 
     g_loss: torch.Tensor = loss + \
         config.codebook_weight * model_output.codebook_loss + \
-        config.commitment_beta * model_output.commitment_loss + \
-        config.entropy_weight * model_output.entropy_loss
+        config.commitment_beta * model_output.commitment_loss
     g_loss /= config.autoencoder_acc_steps
 
     snr = signal_noise_ratio(pred_audio, target_audio, zero_mean=True)
@@ -163,7 +161,6 @@ def inference(
         "Reconstruction Loss": loss.item(),
         "Codebook Loss": model_output.codebook_loss.item(),
         "Commitment Loss": model_output.commitment_loss.item(),
-        "Entropy Loss": model_output.entropy_loss.item(),
         "Generator Loss": g_loss.item(),
         "SNR": snr,
     }

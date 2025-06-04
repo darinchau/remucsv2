@@ -478,7 +478,6 @@ class VAEOutput:
     z: Tensor
     codebook_loss: Tensor
     commitment_loss: Tensor
-    entropy_loss: Tensor
 
 
 class BiModalRVQVAE(nn.Module):
@@ -589,17 +588,13 @@ class BiModalRVQVAE(nn.Module):
         quant_losses = {
             "codebook_loss": torch.tensor(0.0, device=x.device),
             "commitment_loss": torch.tensor(0.0, device=x.device),
-            "entropy_loss": torch.tensor(0.0, device=x.device)
         }
         if self.training and random.random() > self.config.p_skip_quantization:
             residual = out
             for idx, quant in enumerate(self.quants):
-                quant_out, q_losses, indices = quant(residual)
+                quant_out, q_losses, _ = quant(residual)
                 quant_losses["codebook_loss"] += q_losses["codebook_loss"]
                 quant_losses["commitment_loss"] += q_losses["commitment_loss"]
-                p = torch.bincount(indices.flatten(), minlength=self.config.codebook_size) / indices.size(0)
-                entropy_loss = -torch.mean(p * torch.log(p + 1e-10))
-                quant_losses["entropy_loss"] += entropy_loss  # type: ignore
                 if idx == 0:
                     out = quant_out
                 else:
@@ -636,9 +631,8 @@ class BiModalRVQVAE(nn.Module):
         return VAEOutput(
             audio=out,
             z=z,
-            codebook_loss=quant_losses["codebook_loss"],  # type: ignore
-            commitment_loss=quant_losses["commitment_loss"],  # type: ignore
-            entropy_loss=quant_losses["entropy_loss"]  # type: ignore
+            codebook_loss=quant_losses["codebook_loss"],
+            commitment_loss=quant_losses["commitment_loss"],
         )
 
 
