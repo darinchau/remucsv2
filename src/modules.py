@@ -15,10 +15,6 @@ from .stft import STFT
 from .config import VAEConfig
 
 
-def _activation():
-    return nn.LeakyReLU(0.2)
-
-
 class DownBlock1D(nn.Module):
     r"""
     1D Down-convolutional block with optional attention, adapted for audio.
@@ -39,7 +35,7 @@ class DownBlock1D(nn.Module):
         num_layers: int,
         attn: bool,
         norm_channels: int,
-        activation: typing.Callable[[], nn.Module] = _activation,
+        activation: typing.Callable[[], nn.Module],
         use_gradient_checkpointing: bool = False
     ):
         super().__init__()
@@ -150,7 +146,7 @@ class MidBlock1D(nn.Module):
         num_heads: int,
         num_layers: int,
         norm_channels: int,
-        activation: typing.Callable[[], nn.Module] = _activation,
+        activation: typing.Callable[[], nn.Module],
         use_gradient_checkpointing: bool = False
     ):
         super().__init__()
@@ -258,7 +254,7 @@ class UpBlock1D(nn.Module):
         num_layers: int,
         attn: bool,
         norm_channels: int,
-        activation: typing.Callable[[], nn.Module] = _activation,
+        activation: typing.Callable[[], nn.Module],
         use_gradient_checkpointing: bool = False
     ):
         super().__init__()
@@ -508,6 +504,7 @@ class BiModalRVQVAE(nn.Module):
                 num_layers=self.config.num_down_layers,
                 attn=self.config.attn_down[i],
                 norm_channels=self.config.norm_channels,
+                activation=self.config.activation,
                 use_gradient_checkpointing=self.config.gradient_checkpointing
             ))
 
@@ -519,6 +516,7 @@ class BiModalRVQVAE(nn.Module):
                 num_heads=self.config.num_heads,
                 num_layers=self.config.num_mid_layers,
                 norm_channels=self.config.norm_channels,
+                activation=self.config.activation,
                 use_gradient_checkpointing=self.config.gradient_checkpointing
             ))
 
@@ -550,6 +548,7 @@ class BiModalRVQVAE(nn.Module):
                 num_heads=self.config.num_heads,
                 num_layers=self.config.num_mid_layers,
                 norm_channels=self.config.norm_channels,
+                activation=self.config.activation,
                 use_gradient_checkpointing=self.config.gradient_checkpointing
             ))
 
@@ -563,6 +562,7 @@ class BiModalRVQVAE(nn.Module):
                 num_layers=self.config.num_up_layers,
                 attn=self.config.attn_down[i-1],
                 norm_channels=self.config.norm_channels,
+                activation=self.config.activation,
                 use_gradient_checkpointing=self.config.gradient_checkpointing,
             ))
 
@@ -579,7 +579,7 @@ class BiModalRVQVAE(nn.Module):
         for mid in self.encoder_mids:
             out = mid(out)
         out = self.encoder_norm_out(out)
-        out = _activation()(out)
+        out = self.config.activation()(out)
         out = self.encoder_conv_out(out)
         out = self.pre_quant_conv(out)
         # out: (B * S, z_channels, L') where L' is the length after downsampling
@@ -589,7 +589,8 @@ class BiModalRVQVAE(nn.Module):
             "codebook_loss": torch.tensor(0.0, device=x.device),
             "commitment_loss": torch.tensor(0.0, device=x.device),
         }
-        if self.training and random.random() > self.config.p_skip_quantization:
+        skip_quant = random.random() < self.config.p_skip_quantization
+        if not self.training or not skip_quant:
             residual = out
             for idx, quant in enumerate(self.quants):
                 quant_out, q_losses, _ = quant(residual)
@@ -618,7 +619,7 @@ class BiModalRVQVAE(nn.Module):
             out = up(out)
 
         out = self.decoder_norm_out(out)
-        out = _activation()(out)
+        out = self.config.activation()(out)
         out = self.decoder_conv_out(out)
         # (B, 1, L) -> (B, L)
         out.squeeze_(1)
@@ -646,6 +647,7 @@ def test_up_block_1d():
             num_layers=2,
             attn=True,
             norm_channels=32,
+            activation=nn.SiLU,
             use_gradient_checkpointing=False
         )
         input_tensor = torch.randn(1, 64, 720)

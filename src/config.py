@@ -1,9 +1,7 @@
 import os
 from dataclasses import dataclass, asdict, field
-from typing import List
 import yaml
-import warnings
-from .stft import STFT
+import torch.nn as nn
 
 
 def get_random_string(length: int = 14) -> str:
@@ -35,6 +33,7 @@ class VAEConfig:
     num_down_layers: int
     num_mid_layers: int
     num_up_layers: int
+    activation_fn: str
 
     seed: int
     gradient_checkpointing: bool
@@ -62,6 +61,15 @@ class VAEConfig:
         """Sometimes we want to define the audio length in terms of spectrogram dimensions
         This provides a consistent getter for the audio length"""
         return self.length
+
+    def activation(self) -> nn.Module:
+        """Returns the activation function used in the VAE"""
+        return {
+            "relu": nn.ReLU(),
+            "lrelu": nn.LeakyReLU(negative_slope=0.2),
+            "gelu": nn.GELU(),
+            "silu": nn.SiLU(),
+        }[self.activation_fn]
 
     @staticmethod
     def load(file_path: str) -> 'VAEConfig':
