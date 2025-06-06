@@ -415,7 +415,7 @@ class BiModalRVQVAE(nn.Module):
         self.init_decoder()
 
     def init_encoder(self):
-        self.pqmf = PQMF(attenuation=self.config.attenuation, n_band=self.config.bands, polyphase=True)
+        self.pqmf = PQMF(attenuation=self.config.attenuation, n_band=self.config.bands, sr=self.config.sample_rate, polyphase=True)
         self.encoder_conv_in = nn.Conv1d(self.config.bands, self.config.down_channels[0], kernel_size=3, padding=1)
 
         self.encoder_layers = nn.ModuleList([])

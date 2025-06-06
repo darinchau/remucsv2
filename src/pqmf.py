@@ -42,6 +42,32 @@ def get_qmf_bank(h: torch.Tensor, n_band: int):
     return hk
 
 
+def get_log_qmf(
+    N: int,
+    filter_length: int,
+    fs: int,
+    min_freq: int = 20,
+    attenuation: int = 80
+) -> torch.Tensor:
+    nyquist = fs / 2
+    max_freq = nyquist - 1
+    freq_edges = np.logspace(np.log10(min_freq), np.log10(max_freq), N + 1)
+
+    beta: float = kaiser_beta(attenuation)
+
+    # Initialize filters
+    filters_list: list[NDArray[np.floating]] = []
+
+    for i in range(N):
+        passband = [freq_edges[i], freq_edges[i+1]]
+        normalized_passband = np.array(passband) / nyquist
+        filter_coefficients = firwin(filter_length, normalized_passband, window=('kaiser', beta), pass_zero=False)  # type: ignore
+        filters_list.append(filter_coefficients)
+
+    filters = torch.tensor(np.array(filters_list, dtype=np.float32))
+    return filters
+
+
 def kaiser_filter(wc: float, atten: float, N: int | None = None) -> NDArray[np.floating]:
     """
     Computes a kaiser lowpass filter
@@ -162,7 +188,7 @@ class PQMF(nn.Module):
         Applies the PQMF synthesis to the input signal x with shape (B, M, T)
     """
 
-    def __init__(self, attenuation: float, n_band: int, polyphase: bool = True):
+    def __init__(self, sr: int, attenuation: int, n_band: int, polyphase: bool = True):
         super().__init__()
         h = get_prototype(attenuation, n_band)
 
@@ -171,7 +197,7 @@ class PQMF(nn.Module):
             assert power == math.floor(power), "when using the polyphase algorithm, n_band must be a power of 2"
 
         h = torch.from_numpy(h).float()
-        hk = get_qmf_bank(h, n_band)
+        hk = get_log_qmf(n_band, h.shape[-1], sr, attenuation=attenuation)
         hk = center_pad_next_pow_2(hk)
 
         self.register_buffer("hk", hk)

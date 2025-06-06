@@ -35,6 +35,7 @@ class VAEConfig:
     num_down_layers: int
     num_mid_layers: int
     num_up_layers: int
+    log_filter_strategy: bool
     activation_fn: str
 
     seed: int

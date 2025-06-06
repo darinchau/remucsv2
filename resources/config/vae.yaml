@@ -24,6 +24,7 @@ num_heads: 4                                      # Number of attention heads
 num_down_layers : 2                               # Number of downsampling layers
 num_mid_layers : 2                                # Number of middle layers
 num_up_layers : 2                                 # Number of upsampling layers
+log_filter_strategy: True                         # Strategy for creating PQMF filter banks. If true, uses a logarithmically scaled filter bank. Linear is theoretically backed but what the heck lol
 activation_fn: "lrelu"                            # Activation function to use in the model. Can be 'relu', 'gelu', 'silu', 'lrelu'
 
 ## Training parameters
