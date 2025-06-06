@@ -568,7 +568,7 @@ class BiModalRVQVAE(nn.Module):
         z, quant_losses = self.encode(input)
         y_pred = self.decode(z)
         y_true = self.pqmf(target)
-        recon_loss = NF.l1_loss(y_pred, y_true, reduction='mean')
+        recon_loss = NF.mse_loss(y_pred, y_true, reduction='mean')
         audio_out = self.pqmf.inverse(y_pred)
         losses = {
             'Reconstruction Loss': recon_loss,

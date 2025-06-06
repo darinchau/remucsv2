@@ -162,7 +162,7 @@ class PQMF(nn.Module):
         Applies the PQMF synthesis to the input signal x with shape (B, M, T)
     """
 
-    def __init__(self, attenuation, n_band, polyphase=True):
+    def __init__(self, attenuation: float, n_band: int, polyphase: bool = True):
         super().__init__()
         h = get_prototype(attenuation, n_band)
 

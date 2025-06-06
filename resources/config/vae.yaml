@@ -24,7 +24,7 @@ num_heads: 4                                      # Number of attention heads
 num_down_layers : 2                               # Number of downsampling layers
 num_mid_layers : 2                                # Number of middle layers
 num_up_layers : 2                                 # Number of upsampling layers
-activation_fn: "relu"                             # Activation function to use in the model. Can be 'relu', 'gelu', 'silu', 'lrelu'
+activation_fn: "lrelu"                            # Activation function to use in the model. Can be 'relu', 'gelu', 'silu', 'lrelu'
 
 ## Training parameters
 seed : 1943                                       # Random seed
