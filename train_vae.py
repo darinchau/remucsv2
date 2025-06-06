@@ -21,7 +21,7 @@ from accelerate import Accelerator
 from math import isclose
 
 from src.audio import YouTubeURL, Audio
-from src.modules import BiModalRVQVAE as VAE, VAEOutput, MultiBandLoss
+from src.modules import BiModalRVQVAE as VAE, VAEOutput
 from src.vggish import Vggish
 from src.config import VAEConfig
 from src.separate import Separator
@@ -125,7 +125,6 @@ def inference(
     target_audio: Tensor,
     config: VAEConfig,
     model: VAE,
-    recon_loss: nn.Module
 ):
     assert isinstance(target_audio, torch.Tensor)
     assert target_audio.dim() == 3
@@ -141,25 +140,18 @@ def inference(
 
     # Fetch autoencoders output(reconstructions)
     with autocast('cuda'):
-        model_output: VAEOutput = model(input_audio)
+        g_loss, model_output = model.compute_loss(input_audio, target_audio, {
+            "Codebook Loss": config.codebook_weight,
+            "Commitment Loss": config.commitment_beta,
+        })
 
     pred_audio = model_output.audio  # B, L
     assert target_audio.device == pred_audio.device, f"Target audio and predicted audio must be on the same device, got {target_audio.device} and {pred_audio.device}"
     assert target_audio.shape == pred_audio.shape, f"Target audio and predicted audio must have the same shape, got {target_audio.shape} and {pred_audio.shape}"
 
-    loss = recon_loss(pred_audio, target_audio)
-
-    g_loss: torch.Tensor = loss + \
-        config.codebook_weight * model_output.codebook_loss + \
-        config.commitment_beta * model_output.commitment_loss
-    g_loss /= config.autoencoder_acc_steps
-
     snr = signal_noise_ratio(pred_audio, target_audio, zero_mean=True)
 
-    components: dict[str, float] = {
-        "Reconstruction Loss": loss.item(),
-        "Codebook Loss": model_output.codebook_loss.item(),
-        "Commitment Loss": model_output.commitment_loss.item(),
+    components: dict[str, float] = {k: v.item() for k, v in model_output.losses.items()} | {
         "Generator Loss": g_loss.item(),
         "SNR": snr,
     }
@@ -171,7 +163,6 @@ def validate(
     config: VAEConfig,
     model: VAE,
     val_data_loader: DataLoader,
-    recon_loss: nn.Module,
     step_count: int,
 ):
     val_count_ = 0
@@ -190,8 +181,7 @@ def validate(
             model_output, components, g_loss = inference(
                 target_audio,
                 config,
-                model,
-                recon_loss
+                model
             )
             pred_audio = model_output.audio  # B, L
 
@@ -289,8 +279,6 @@ def train(config: VAEConfig, start_from_iter: int = 0):
         model, optimizer_g, data_loader
     )
 
-    recon_loss = MultiBandLoss(config.bands).to(device)
-
     model.train()
 
     while True:
@@ -308,17 +296,16 @@ def train(config: VAEConfig, start_from_iter: int = 0):
                 target_audio,
                 config,
                 model,
-                recon_loss
             )
 
-            accelerator.backward(g_loss)
+            accelerator.backward(g_loss / config.autoencoder_acc_steps)
 
             if step_count % config.autoencoder_acc_steps == 0:
                 optimizer_g.step()
                 optimizer_g.zero_grad()
 
             losses = {c: x for c, x in components.items()}
-            losses["Total Generator Loss"] = g_loss.item() * config.autoencoder_acc_steps  # Scale the loss back to the original scale
+            losses["Total Generator Loss"] = g_loss.item()
             losses["Generator Learning Rate"] = optimizer_g.param_groups[0]['lr']
             wandb.log(losses, step=step_count)
 
@@ -334,7 +321,6 @@ def train(config: VAEConfig, start_from_iter: int = 0):
                     config,
                     model,
                     val_data_loader,
-                    recon_loss,
                     step_count,
                 )
 

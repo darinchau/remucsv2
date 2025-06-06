@@ -24,6 +24,8 @@ class VAEConfig:
     codebook_size: int
     nquantizers: int
     z_channels: int
+    bands: int
+    attenuation: int
     down_channels: tuple[int, ...]
     mid_channels: tuple[int, ...]
     down_sample: tuple[int, ...]
@@ -41,13 +43,11 @@ class VAEConfig:
     batch_size: int
     codebook_weight: float
     commitment_beta: float
-    bands: tuple[int, ...]
     p_skip_quantization: float
     steps: int
     autoencoder_lr: float
     autoencoder_acc_steps: int
     save_steps: int
-    loss: str
     ckpt_name: str
     run_name: str
     val_steps: int
