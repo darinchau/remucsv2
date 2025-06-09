@@ -21,8 +21,6 @@ class VAEConfig:
     sample_rate: int
     length: int
 
-    codebook_size: int
-    nquantizers: int
     z_channels: int
     bands: int
     attenuation: int

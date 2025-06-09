@@ -345,51 +345,26 @@ class UpBlock1D(nn.Module):
         return out
 
 
-class Quantizer(nn.Module):
-    """Takes in x of shape (B, C=z_channels, L) and returns quantized output and indices
-
-    Returns:
-        quant_out: Tensor of shape (B, C, L)
-        quantize_losses: dict with 'codebook_loss' and 'commitment_loss'
-        min_encoding_indices: Tensor of shape (B, L)
+class KLEncoder1D(nn.Module):
+    """
+    KLEncoder is a simple module that performs 'that' step of the VAE process
+    calculates the KL loss and returns stuff on a BCL tensor, C = latent_dim.
     """
 
-    def __init__(self, codebook_size: int, z_channels: int):
+    def __init__(self, latent_dim: int):
         super().__init__()
-        self.codebook = nn.Embedding(codebook_size, z_channels)
+        self.encoder = nn.Conv1d(latent_dim, 2 * latent_dim, kernel_size=1, stride=1, padding=0)
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: Tensor):
         B, C, L = x.shape
-
-        # B, C, L -> B, L, C
-        x = x.permute(0, 2, 1)
-
-        # Find nearest embedding/codebook vector
-        # dist between (B, L, C) and (1, K, C) -> (B, L, K)
-        dist = torch.cdist(x, self.codebook.weight[None, :].repeat((x.size(0), 1, 1)))
-        # B, L
-        min_encoding_indices = torch.argmin(dist, dim=-1)
-
-        # Replace encoder output with nearest codebook
-        # B*L, C
-        quant_out = torch.index_select(self.codebook.weight, 0, min_encoding_indices.view(-1))
-
-        # x -> B*L, C
-        x = x.reshape((-1, x.size(-1)))
-        commmitment_loss = torch.mean((quant_out.detach() - x) ** 2)
-        codebook_loss = torch.mean((quant_out - x.detach()) ** 2)
-        quantize_losses = {
-            'codebook_loss': codebook_loss,
-            'commitment_loss': commmitment_loss
-        }
-
-        # Straight through estimation
-        quant_out = x + (quant_out - x).detach()
-
-        # B*L, C -> B, C, L
-        quant_out = quant_out.reshape((B, L, C)).permute(0, 2, 1)
-        min_encoding_indices = min_encoding_indices.reshape((B, L))
-        return quant_out, quantize_losses, min_encoding_indices
+        x = self.encoder(x)
+        mean = x[:, :C, :]  # Mean of the latent space
+        log_var = x[:, C:, :]  # Log variance of the latent space
+        log_var = NF.softplus(log_var)  # Ensure log_var is positive
+        z = mean + torch.randn_like(mean) * torch.exp(0.5 * log_var)  # Reparameterization trick
+        kl_loss = -0.5 * torch.sum(1 + log_var - mean.pow(2) - log_var.exp(), dim=(1, 2))
+        kl_loss = kl_loss.mean()  # Average KL loss over the batch
+        return z, {"kl_loss": kl_loss}
 
 
 @dataclass
@@ -399,7 +374,7 @@ class VAEOutput:
     losses: dict[str, Tensor]
 
 
-class BiModalRVQVAE(nn.Module):
+class VAE(nn.Module):
     def __init__(self, config: VAEConfig):
         super().__init__()
         self.config = config
@@ -415,7 +390,7 @@ class BiModalRVQVAE(nn.Module):
         self.init_decoder()
 
     def init_encoder(self):
-        self.pqmf = PQMF(attenuation=self.config.attenuation, n_band=self.config.bands, sr=self.config.sample_rate, polyphase=True)
+        self.pqmf = PQMF(attenuation=self.config.attenuation, n_band=self.config.bands, sr=self.config.sample_rate, polyphase=True, log_qmf=self.config.log_filter_strategy)
         self.encoder_conv_in = nn.Conv1d(self.config.bands, self.config.down_channels[0], kernel_size=3, padding=1)
 
         self.encoder_layers = nn.ModuleList([])
@@ -447,14 +422,8 @@ class BiModalRVQVAE(nn.Module):
         self.encoder_norm_out = nn.GroupNorm(self.config.norm_channels, self.config.down_channels[-1])
         self.encoder_conv_out = nn.Conv1d(self.config.down_channels[-1], self.config.z_channels, kernel_size=3, padding=1)
 
-        # Pre Quantization Convolution
-        self.pre_quant_conv = nn.Conv1d(self.config.z_channels, self.config.z_channels, kernel_size=1)
-
         # Codebook
-        self.quants = nn.ModuleList([
-            Quantizer(codebook_size=self.config.codebook_size, z_channels=self.config.z_channels)
-            for _ in range(self.config.nquantizers)
-        ])
+        self.encoder = KLEncoder1D(self.config.z_channels)
 
     def init_decoder(self):
         # Post Quantization Convolution
@@ -496,9 +465,9 @@ class BiModalRVQVAE(nn.Module):
         # x: (B, S, L)
         B, S, L = x.shape
         out = x.flatten(0, 1)
+        out = self.pqmf(out)
 
         # x: (B * S, bands, L // bands)
-        out = self.pqmf(out)
         out = self.encoder_conv_in(out)
         for idx, down in enumerate(self.encoder_layers):
             out = down(out)
@@ -507,27 +476,11 @@ class BiModalRVQVAE(nn.Module):
         out = self.encoder_norm_out(out)
         out = self.config.activation()(out)
         out = self.encoder_conv_out(out)
-        # out: (B * S, z_channels, L') where L' is the length after downsampling
-        out = self.pre_quant_conv(out)
-        quant_losses = {
-            "codebook_loss": torch.tensor(0.0, device=x.device),
-            "commitment_loss": torch.tensor(0.0, device=x.device),
-        }
-        skip_quant = random.random() < self.config.p_skip_quantization
-        if not self.training or not skip_quant:
-            residual = out
-            for idx, quant in enumerate(self.quants):
-                quant_out, q_losses, _ = quant(residual)
-                quant_losses["codebook_loss"] += q_losses["codebook_loss"]
-                quant_losses["commitment_loss"] += q_losses["commitment_loss"]
-                if idx == 0:
-                    out = quant_out
-                else:
-                    out += quant_out
-                residual -= quant_out
+
+        # out: (B * S, z_channels, L' = L // factor)
+        out, losses = self.encoder(out)
         out = out.unflatten(0, (B, S))
-        # out shape: (B, S, z_channels, L')
-        return out, quant_losses
+        return out, losses
 
     def decode(self, z: Tensor):
         B, S, Z, L_ = z.shape
@@ -550,13 +503,13 @@ class BiModalRVQVAE(nn.Module):
 
     def forward(self, x):
         # x: (B, S, L)
-        z, quant_losses = self.encode(x)
+        z, losses = self.encode(x)
         out = self.decode(z)
         audio_out = self.pqmf.inverse(out)
         return VAEOutput(
             audio=audio_out,
             z=z,
-            losses=quant_losses
+            losses=losses
         )
 
     def compute_loss(self, input: torch.Tensor, target: torch.Tensor, weight: dict[str, float]):
@@ -565,15 +518,14 @@ class BiModalRVQVAE(nn.Module):
         assert B == B_, f"Batch size mismatch: {B} != {B_}"
         assert L == L_, f"Length mismatch: {L} != {L_}"
         assert S == self.config.nstems, f"Expected nstems {self.config.nstems}, got {S}"
-        z, quant_losses = self.encode(input)
+        z, encoder_loss = self.encode(input)
         y_pred = self.decode(z)
         y_true = self.pqmf(target)
         recon_loss = NF.mse_loss(y_pred, y_true, reduction='mean')
         audio_out = self.pqmf.inverse(y_pred)
         losses = {
             'Reconstruction Loss': recon_loss,
-            'Codebook Loss': quant_losses['codebook_loss'],
-            'Commitment Loss': quant_losses['commitment_loss']
+            'KL Loss': encoder_loss['kl_loss'],
         }
         total = sum((losses[key] * weight.get(key, 1.0) for key in losses), start=torch.tensor(0.0, device=input.device))
         return total, VAEOutput(

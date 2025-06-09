@@ -21,7 +21,7 @@ from accelerate import Accelerator
 from math import isclose
 
 from src.audio import YouTubeURL, Audio
-from src.modules import BiModalRVQVAE as VAE, VAEOutput
+from src.modules import VAE, VAEOutput
 from src.vggish import Vggish
 from src.config import VAEConfig
 from src.separate import Separator

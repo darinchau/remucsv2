@@ -188,7 +188,7 @@ class PQMF(nn.Module):
         Applies the PQMF synthesis to the input signal x with shape (B, M, T)
     """
 
-    def __init__(self, sr: int, attenuation: int, n_band: int, polyphase: bool = True):
+    def __init__(self, sr: int, attenuation: int, n_band: int, polyphase: bool = True, log_qmf: bool = True):
         super().__init__()
         h = get_prototype(attenuation, n_band)
 
@@ -197,7 +197,10 @@ class PQMF(nn.Module):
             assert power == math.floor(power), "when using the polyphase algorithm, n_band must be a power of 2"
 
         h = torch.from_numpy(h).float()
-        hk = get_log_qmf(n_band, h.shape[-1], sr, attenuation=attenuation)
+        if log_qmf:
+            hk = get_log_qmf(n_band, h.shape[-1], sr, attenuation=attenuation)
+        else:
+            hk = get_qmf_bank(h, n_band)
         hk = center_pad_next_pow_2(hk)
 
         self.register_buffer("hk", hk)

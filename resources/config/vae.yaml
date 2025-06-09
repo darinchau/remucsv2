@@ -10,8 +10,6 @@ sample_rate: 44100                                # Sample rate of the audio
 length: 131072                                    # Length of each audio sample in samples (5s)
 
 ## Model parameters
-codebook_size: 32768                              # Size of each codebook for VQ-VAE
-nquantizers: 1                                    # Number of quantizers in the RVQ component
 z_channels: 512                                   # Number of channels in the latent space
 bands: 16                                         # Bands to use for multiband decomposition
 attenuation: 80                                   # Attenuation in dB for multiband decomposition
