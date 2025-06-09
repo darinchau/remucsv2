@@ -10,9 +10,9 @@ sample_rate: 44100                                # Sample rate of the audio
 length: 131072                                    # Length of each audio sample in samples (5s)
 
 ## Model parameters
-codebook_size: 4096                               # Size of each codebook for VQ-VAE
-nquantizers: 4                                    # Number of quantizers in the RVQ component
-z_channels: 128                                   # Number of channels in the latent space
+codebook_size: 32768                              # Size of each codebook for VQ-VAE
+nquantizers: 1                                    # Number of quantizers in the RVQ component
+z_channels: 512                                   # Number of channels in the latent space
 bands: 16                                         # Bands to use for multiband decomposition
 attenuation: 80                                   # Attenuation in dB for multiband decomposition
 down_channels : [64, 128, 256, 512]               # Number of channels in each downsampling layer
@@ -34,7 +34,7 @@ num_workers_dl: 4                                 # Number of workers for data l
 batch_size: 4                                     # Batch size for autoencoder training
 codebook_weight: 1                                # Weight of codebook loss
 commitment_beta: 0.2                              # Weight of commitment loss
-p_skip_quantization: 0.0                          # Probability of skipping quantization during the training step to ensure efficient gradient flow
+p_skip_quantization: 0.5                          # Probability of skipping quantization during the training step to ensure efficient gradient flow
 steps: 99999                                      # Number of training steps to perform in total
 autoencoder_lr: 0.00001                           # Learning rate for the autoencoder
 autoencoder_acc_steps: 16                         # Number of accumulation steps for the autoencoder
