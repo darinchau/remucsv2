@@ -5,14 +5,20 @@ import torch.nn as nn
 import random
 import torch
 import torchaudio
-import torch.functional as F
-import torch.nn.functional as NF
+import torch.nn.functional as F
 import typing
 from torch import nn, Tensor
 from torch.utils.checkpoint import checkpoint
 from dataclasses import dataclass
 from .config import VAEConfig
 from .pqmf import PQMF
+
+
+def get_qmf(config: VAEConfig) -> PQMF:
+    """
+    Returns a PQMF object based on the configuration.
+    """
+    return PQMF(attenuation=config.attenuation, n_band=config.bands, sr=config.sample_rate, polyphase=True, log_qmf=config.log_filter_strategy)
 
 
 class DownBlock1D(nn.Module):
@@ -360,11 +366,153 @@ class KLEncoder1D(nn.Module):
         x = self.encoder(x)
         mean = x[:, :C, :]  # Mean of the latent space
         log_var = x[:, C:, :]  # Log variance of the latent space
-        log_var = NF.softplus(log_var)  # Ensure log_var is positive
+        log_var = F.softplus(log_var)  # Ensure log_var is positive
         z = mean + torch.randn_like(mean) * torch.exp(0.5 * log_var)  # Reparameterization trick
         kl_loss = -0.5 * torch.sum(1 + log_var - mean.pow(2) - log_var.exp(), dim=(1, 2))
         kl_loss = kl_loss.mean()  # Average KL loss over the batch
         return z, {"kl_loss": kl_loss}
+
+
+class MultiresolutionSTFTLoss(nn.Module):
+    def __init__(self, resolutions: list[int]):
+        super().__init__()
+        self.resolutions = resolutions
+        self.stft_losses = nn.ModuleList([torchaudio.transforms.Spectrogram(n_fft=res, win_length=res, hop_length=res // 2) for res in resolutions])
+
+    def forward(self, x: Tensor, y: Tensor):
+        assert x.shape == y.shape, "Input tensors must have the same shape"
+        B, L = x.shape
+        loss = torch.tensor(0.0, device=x.device)
+        for stft in self.stft_losses:
+            x_stft = stft(x)
+            y_stft = stft(y)
+            loss += F.mse_loss(x_stft, y_stft)
+        return loss / len(self.stft_losses)  # Average loss over resolutions
+
+
+class MultibandDiscriminator(nn.Module):
+    def __init__(self, config: VAEConfig):
+        super().__init__()
+        # One with audio
+        self.audio_discriminator = nn.ModuleList([])
+        self.audio_discriminator.append(
+            nn.Conv1d(
+                in_channels=1,
+                out_channels=config.down_channels[0],
+                kernel_size=1,
+                stride=1,
+                padding=1
+            )
+        )
+        for i in range(len(config.down_channels) - 1):
+            self.audio_discriminator.append(
+                nn.Conv1d(
+                    in_channels=config.down_channels[i],
+                    out_channels=config.down_channels[i + 1],
+                    kernel_size=128,  # TODO make configurable
+                    stride=config.down_sample[i],
+                    padding=63
+                )
+            )
+            self.audio_discriminator.append(
+                nn.GroupNorm(config.norm_channels, config.down_channels[i + 1])
+            )
+            self.audio_discriminator.append(
+                config.activation()
+            )
+        self.audio_discriminator.append(
+            nn.Conv1d(config.down_channels[-1], 1, kernel_size=1, stride=1, padding=0)
+        )
+
+        # One with spectrogram
+        self.spectrogram_discriminator = nn.ModuleList([])
+        self.spectrogram_discriminator.append(
+            nn.Conv2d(
+                in_channels=1,
+                out_channels=config.down_channels[0],
+                kernel_size=1,
+                stride=1,
+                padding=0
+            )
+        )
+        for i in range(len(config.down_channels) - 1):
+            self.spectrogram_discriminator.append(
+                nn.Conv2d(
+                    in_channels=config.down_channels[i],
+                    out_channels=config.down_channels[i + 1],
+                    kernel_size=(3, 3),
+                    stride=(1, 1),
+                    padding=(1, 1)
+                )
+            )
+            self.spectrogram_discriminator.append(
+                nn.GroupNorm(config.norm_channels, config.down_channels[i + 1])
+            )
+            self.spectrogram_discriminator.append(
+                config.activation()
+            )
+            self.spectrogram_discriminator.append(
+                nn.MaxPool2d(kernel_size=(2, 2), stride=(2, 2), padding=(0, 0))
+            )
+        self.spectrogram_discriminator.append(
+            nn.Conv2d(config.down_channels[-1], 1, kernel_size=(1, 1), stride=(1, 1), padding=(0, 0))
+        )
+
+        # One directly on band space
+        self.band_discriminator = nn.ModuleList([])
+        self.band_discriminator.append(
+            nn.Conv1d(
+                in_channels=config.bands,
+                out_channels=config.down_channels[0],
+                kernel_size=1,
+                stride=1,
+                padding=0
+            )
+        )
+        for i in range(len(config.down_channels) - 1):
+            self.band_discriminator.append(
+                nn.Conv1d(
+                    in_channels=config.down_channels[i],
+                    out_channels=config.down_channels[i + 1],
+                    kernel_size=16,  # TODO make configurable
+                    stride=config.down_sample[i],
+                    padding=7
+                )
+            )
+            self.band_discriminator.append(
+                nn.GroupNorm(config.norm_channels, config.down_channels[i + 1])
+            )
+            self.band_discriminator.append(
+                config.activation()
+            )
+        self.band_discriminator.append(
+            nn.Conv1d(config.down_channels[-1], 1, kernel_size=1, stride=1, padding=0)
+        )
+
+        self.pqmf = get_qmf(config)
+        self.config = config
+
+    def forward(self, x: Tensor):
+        # Assume B, band, L input
+        B, band, L = x.shape
+
+        aud = self.pqmf.inverse(x)
+        aud_out = aud.unsqueeze(1)
+        for layer in self.audio_discriminator:
+            aud_out = layer(aud_out)
+        aud_out = aud_out.squeeze(1)
+
+        spec = torchaudio.transforms.Spectrogram(n_fft=2048)(aud)
+        spec_out = spec.unsqueeze(1)
+        for layer in self.spectrogram_discriminator:
+            spec_out = layer(spec_out)
+        spec_out = spec_out.squeeze(1).flatten(1, -1)
+
+        band_out = x
+        for layer in self.band_discriminator:
+            band_out = layer(band_out)
+        band_out = band_out.squeeze(1)
+        return torch.cat([aud_out, spec_out, band_out], dim=1)
 
 
 @dataclass
@@ -390,7 +538,7 @@ class VAE(nn.Module):
         self.init_decoder()
 
     def init_encoder(self):
-        self.pqmf = PQMF(attenuation=self.config.attenuation, n_band=self.config.bands, sr=self.config.sample_rate, polyphase=True, log_qmf=self.config.log_filter_strategy)
+        self.pqmf = get_qmf(self.config)
         self.encoder_conv_in = nn.Conv1d(self.config.bands, self.config.down_channels[0], kernel_size=3, padding=1)
 
         self.encoder_layers = nn.ModuleList([])
@@ -512,20 +660,29 @@ class VAE(nn.Module):
             losses=losses
         )
 
-    def compute_loss(self, input: torch.Tensor, target: torch.Tensor, weight: dict[str, float]):
+    def compute_loss(self, input: Tensor, target: Tensor, weight: dict[str, float]):
+        """
+        Computes the loss for the VAE model.
+        Args:
+            input_audios (Tensor): Input audio tensors of shape (B, S, L).
+            target_audio (Tensor): Target audio tensors of shape (B, S, L).
+            disc (MultibandDiscriminator): Discriminator model.
+        Returns:
+            Tensor, dict: Dictionary containing the loss values.
+        """
         B, S, L = input.shape
         B_, L_ = target.shape
         assert B == B_, f"Batch size mismatch: {B} != {B_}"
         assert L == L_, f"Length mismatch: {L} != {L_}"
         assert S == self.config.nstems, f"Expected nstems {self.config.nstems}, got {S}"
-        z, encoder_loss = self.encode(input)
+        z, quant_losses = self.encode(input)
         y_pred = self.decode(z)
         y_true = self.pqmf(target)
-        recon_loss = NF.mse_loss(y_pred, y_true, reduction='mean')
+        recon_loss = F.mse_loss(y_pred, y_true, reduction='mean')
         audio_out = self.pqmf.inverse(y_pred)
         losses = {
             'Reconstruction Loss': recon_loss,
-            'KL Loss': encoder_loss['kl_loss'],
+            'KL Loss': quant_losses['kl_loss'],
         }
         total = sum((losses[key] * weight.get(key, 1.0) for key in losses), start=torch.tensor(0.0, device=input.device))
         return total, VAEOutput(

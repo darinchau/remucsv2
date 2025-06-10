@@ -140,10 +140,7 @@ def inference(
 
     # Fetch autoencoders output(reconstructions)
     with autocast('cuda'):
-        g_loss, model_output = model.compute_loss(input_audio, target_audio, {
-            "Codebook Loss": config.codebook_weight,
-            "Commitment Loss": config.commitment_beta,
-        })
+        g_loss, model_output = model(input_audio)
 
     pred_audio = model_output.audio  # B, L
     assert target_audio.device == pred_audio.device, f"Target audio and predicted audio must be on the same device, got {target_audio.device} and {pred_audio.device}"
