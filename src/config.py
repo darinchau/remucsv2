@@ -40,7 +40,8 @@ class VAEConfig:
     gradient_checkpointing: bool
     num_workers_dl: int
     batch_size: int
-    codebook_weight: float
+    disc_start_step: int
+    adv_weight: float
     commitment_beta: float
     p_skip_quantization: float
     steps: int

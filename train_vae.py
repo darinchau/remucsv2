@@ -21,7 +21,7 @@ from accelerate import Accelerator
 from math import isclose
 
 from src.audio import YouTubeURL, Audio
-from src.modules import VAE, VAEOutput
+from src.modules import VAE, VAEOutput, MultibandDiscriminator as Discriminator
 from src.vggish import Vggish
 from src.config import VAEConfig
 from src.separate import Separator
@@ -125,10 +125,11 @@ def inference(
     target_audio: Tensor,
     config: VAEConfig,
     model: VAE,
+    disc: Discriminator,
+    step_count: int,
 ):
     assert isinstance(target_audio, torch.Tensor)
     assert target_audio.dim() == 3
-
     input_audio = target_audio[:, :-1]  # Remove the last channel which is the real audio
     target_audio = target_audio[:, -1]
     assert input_audio.shape[1:] == (config.nstems, config.audio_length), \
@@ -138,28 +139,86 @@ def inference(
     input_audio = input_audio.float().to(device)
     target_audio = target_audio.float().to(device)
 
-    # Fetch autoencoders output(reconstructions)
+    model_output: VAEOutput
     with autocast('cuda'):
-        g_loss, model_output = model(input_audio)
+        model_output = model(input_audio)
 
     pred_audio = model_output.audio  # B, L
     assert target_audio.device == pred_audio.device, f"Target audio and predicted audio must be on the same device, got {target_audio.device} and {pred_audio.device}"
     assert target_audio.shape == pred_audio.shape, f"Target audio and predicted audio must have the same shape, got {target_audio.shape} and {pred_audio.shape}"
 
+    ypred = model_output.pqmf
+    ytrue = model.pqmf(target_audio)
+    with torch.autocast('cuda'):
+        recon_loss = F.mse_loss(ypred, ytrue)
+
+    kl_loss = model_output.kl_loss
+
+    if step_count < config.disc_start_step:
+        gen_loss = torch.tensor(0.0, device=device)
+    else:
+        with torch.autocast('cuda'):
+            dgz = disc(ypred)
+            gen_loss = -dgz.mean()
+
+    g_loss = recon_loss + config.commitment_beta * kl_loss + config.adv_weight * gen_loss
+
     snr = signal_noise_ratio(pred_audio, target_audio, zero_mean=True)
 
-    components: dict[str, float] = {k: v.item() for k, v in model_output.losses.items()} | {
+    components: dict[str, float] = {
         "Generator Loss": g_loss.item(),
         "SNR": snr,
+        "Reconstruction Loss": recon_loss.item(),
+        "KL Loss": kl_loss.item(),
+        "Adversarial Loss": gen_loss.item(),
     }
 
     return model_output, components, g_loss
+
+
+def inference_discriminator(
+    target_audio: Tensor,
+    config: VAEConfig,
+    model: VAE,
+    disc: Discriminator,
+):
+    assert isinstance(target_audio, torch.Tensor)
+    assert target_audio.dim() == 3
+    input_audio = target_audio[:, :-1]  # Remove the last channel which is the real audio
+    target_audio = target_audio[:, -1]
+    assert input_audio.shape[1:] == (config.nstems, config.audio_length), \
+        f"Expected target audio shape to be (_, {config.nstems}, {config.audio_length}), " \
+        f"but got {input_audio.shape}"
+
+    input_audio = input_audio.float().to(device)
+    target_audio = target_audio.float().to(device)
+
+    with torch.no_grad():
+        model_output: VAEOutput
+        with autocast('cuda'):
+            model_output = model(input_audio)
+
+        pred_audio = model_output.audio  # B, L
+        assert target_audio.device == pred_audio.device, f"Target audio and predicted audio must be on the same device, got {target_audio.device} and {pred_audio.device}"
+        assert target_audio.shape == pred_audio.shape, f"Target audio and predicted audio must have the same shape, got {target_audio.shape} and {pred_audio.shape}"
+
+        fake_input = model_output.pqmf
+        real_input = model.pqmf(target_audio)
+
+    with torch.autocast('cuda'):
+        dgz = disc(fake_input)
+        dx = disc(real_input)
+    assert dgz.shape == dx.shape, f"Discriminator outputs must have the same shape, got {dgz.shape} and {dx.shape}"
+
+    disc_loss = F.relu(1.0 - dx).mean() + F.relu(1.0 + dgz).mean()
+    return disc_loss
 
 
 def validate(
     config: VAEConfig,
     model: VAE,
     val_data_loader: DataLoader,
+    disc: Discriminator,
     step_count: int,
 ):
     val_count_ = 0
@@ -167,6 +226,7 @@ def validate(
         return
 
     model.eval()
+    disc.eval()
     log_audio = None
     val_loss_components = defaultdict(list)
     with torch.no_grad():
@@ -178,7 +238,9 @@ def validate(
             model_output, components, g_loss = inference(
                 target_audio,
                 config,
-                model
+                model,
+                disc,
+                step_count
             )
             pred_audio = model_output.audio  # B, L
 
@@ -203,6 +265,7 @@ def validate(
             "Validation Audio": log_audios
         }, step=step_count)
     model.train()
+    disc.train()
 
 
 def train(config: VAEConfig, start_from_iter: int = 0):
@@ -254,10 +317,15 @@ def train(config: VAEConfig, start_from_iter: int = 0):
             return 1.0
         return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
+    # Create the discriminator
+    disc = Discriminator(config).to(device)
+
     optimizer_g = Adam(model.parameters(), lr=config.autoencoder_lr, betas=(0.5, 0.999))
+    optimizer_d = Adam(disc.parameters(), lr=config.autoencoder_lr, betas=(0.5, 0.999))
 
     warmup_steps = config.warmup_steps
     scheduler_g = warmup_lr_scheduler(optimizer_g, warmup_steps, config.autoencoder_lr)
+    scheduler_d = warmup_lr_scheduler(optimizer_d, warmup_steps, config.autoencoder_lr)
 
     accelerator = Accelerator(mixed_precision="bf16")
 
@@ -289,10 +357,12 @@ def train(config: VAEConfig, start_from_iter: int = 0):
                 stop_training = True
                 break
 
-            _, components, g_loss = inference(
+            model_output, losses, g_loss = inference(
                 target_audio,
                 config,
                 model,
+                disc,
+                step_count
             )
 
             accelerator.backward(g_loss / config.autoencoder_acc_steps)
@@ -301,10 +371,8 @@ def train(config: VAEConfig, start_from_iter: int = 0):
                 optimizer_g.step()
                 optimizer_g.zero_grad()
 
-            losses = {c: x for c, x in components.items()}
             losses["Total Generator Loss"] = g_loss.item()
             losses["Generator Learning Rate"] = optimizer_g.param_groups[0]['lr']
-            wandb.log(losses, step=step_count)
 
             if step_count % config.save_steps == 0:
                 model_save_path = VAEConfig.get_vae_save_path(config, step_count)
@@ -312,14 +380,40 @@ def train(config: VAEConfig, start_from_iter: int = 0):
 
             scheduler_g.step()
 
+            ########### Update discriminator #############
+            if step_count > config.disc_start_step:
+                disc_loss = inference_discriminator(
+                    target_audio,
+                    config,
+                    model,
+                    disc
+                )
+
+                accelerator.backward(disc_loss / config.autoencoder_acc_steps)
+
+                if step_count % config.autoencoder_acc_steps == 0:
+                    optimizer_d.step()
+                    optimizer_d.zero_grad()
+
+                scheduler_d.step()
+            else:
+                disc_loss = torch.tensor(0.0, device=device)
+
+            losses["Discriminator Loss"] = disc_loss.item()
+            losses["Discriminator Learning Rate"] = optimizer_d.param_groups[0]['lr']
+
             ########### Perform Validation #############
             with torch.no_grad():
                 validate(
                     config,
                     model,
                     val_data_loader,
+                    disc,
                     step_count,
                 )
+
+            ########### Log losses #############
+            wandb.log(losses, step=step_count)
 
         # End of epoch. Clean up the gradients and losses and save the model
         optimizer_g.step()

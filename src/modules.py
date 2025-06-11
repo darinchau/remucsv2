@@ -370,7 +370,7 @@ class KLEncoder1D(nn.Module):
         z = mean + torch.randn_like(mean) * torch.exp(0.5 * log_var)  # Reparameterization trick
         kl_loss = -0.5 * torch.sum(1 + log_var - mean.pow(2) - log_var.exp(), dim=(1, 2))
         kl_loss = kl_loss.mean()  # Average KL loss over the batch
-        return z, {"kl_loss": kl_loss}
+        return z, kl_loss
 
 
 class MultiresolutionSTFTLoss(nn.Module):
@@ -519,7 +519,8 @@ class MultibandDiscriminator(nn.Module):
 class VAEOutput:
     audio: Tensor
     z: Tensor
-    losses: dict[str, Tensor]
+    kl_loss: Tensor
+    pqmf: Tensor
 
 
 class VAE(nn.Module):
@@ -626,9 +627,9 @@ class VAE(nn.Module):
         out = self.encoder_conv_out(out)
 
         # out: (B * S, z_channels, L' = L // factor)
-        out, losses = self.encoder(out)
+        out, kl_loss = self.encoder(out)
         out = out.unflatten(0, (B, S))
-        return out, losses
+        return out, kl_loss
 
     def decode(self, z: Tensor):
         B, S, Z, L_ = z.shape
@@ -651,44 +652,15 @@ class VAE(nn.Module):
 
     def forward(self, x):
         # x: (B, S, L)
-        z, losses = self.encode(x)
+        z, kl_loss = self.encode(x)
         out = self.decode(z)
+        # out: (B, band, L')
         audio_out = self.pqmf.inverse(out)
         return VAEOutput(
             audio=audio_out,
             z=z,
-            losses=losses
-        )
-
-    def compute_loss(self, input: Tensor, target: Tensor, weight: dict[str, float]):
-        """
-        Computes the loss for the VAE model.
-        Args:
-            input_audios (Tensor): Input audio tensors of shape (B, S, L).
-            target_audio (Tensor): Target audio tensors of shape (B, S, L).
-            disc (MultibandDiscriminator): Discriminator model.
-        Returns:
-            Tensor, dict: Dictionary containing the loss values.
-        """
-        B, S, L = input.shape
-        B_, L_ = target.shape
-        assert B == B_, f"Batch size mismatch: {B} != {B_}"
-        assert L == L_, f"Length mismatch: {L} != {L_}"
-        assert S == self.config.nstems, f"Expected nstems {self.config.nstems}, got {S}"
-        z, quant_losses = self.encode(input)
-        y_pred = self.decode(z)
-        y_true = self.pqmf(target)
-        recon_loss = F.mse_loss(y_pred, y_true, reduction='mean')
-        audio_out = self.pqmf.inverse(y_pred)
-        losses = {
-            'Reconstruction Loss': recon_loss,
-            'KL Loss': quant_losses['kl_loss'],
-        }
-        total = sum((losses[key] * weight.get(key, 1.0) for key in losses), start=torch.tensor(0.0, device=input.device))
-        return total, VAEOutput(
-            audio=audio_out,
-            z=z,
-            losses=losses
+            kl_loss=kl_loss,
+            pqmf=out
         )
 
 
